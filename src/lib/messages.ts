@@ -178,6 +178,11 @@ export interface InspectSources {
   type: "INSPECT_SOURCES";
   sourcesByQuote: Record<string, VerifiedSource[]>;
   contextsByQuote: Record<string, ContextSource[]>;
+  /**
+   * Per-claim reason the tracer produced no result — no endpoint configured, or the run failed.
+   * A quote absent from this map was actually checked, so an empty source list means "none found".
+   */
+  notCheckedByQuote: Record<string, string>;
 }
 
 export interface InspectDone {

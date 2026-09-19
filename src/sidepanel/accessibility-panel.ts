@@ -1,7 +1,7 @@
 import { computeFleschKincaidGrade } from "../lib/flesch-kincaid";
 import { extractPageBlocks, applyRewrites, applyBullets, restoreOriginal } from "../content/functions";
 import { startRewrite } from "../lib/messages";
-import { getActiveTabId } from "../lib/active-tab";
+import { getActiveTabId, isActiveTab } from "../lib/active-tab";
 import { hasApiKey } from "../lib/provider";
 import type { Grade, PageModel, RewriteFormat } from "../lib/types";
 
@@ -129,6 +129,8 @@ function renderAccessibilityPanel(container: HTMLElement): AccessibilityPanelEls
 export function mountAccessibilityPanel(container: HTMLElement): void {
   const els = renderAccessibilityPanel(container);
   let pageModel: PageModel | null = null;
+  /** The tab Analyze ran on — block ids are only meaningful there. */
+  let analyzedTabId: number | null = null;
 
   els.optionsLink.addEventListener("click", () => {
     chrome.runtime.openOptionsPage();
@@ -157,6 +159,7 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
         func: extractPageBlocks,
       });
       pageModel = result ?? null;
+      analyzedTabId = tabId;
 
       if (!pageModel || pageModel.blocks.length === 0) {
         els.status.textContent = "No paragraph text found on this page.";
@@ -182,10 +185,16 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
   });
 
   els.rewriteBtn.addEventListener("click", async () => {
-    if (!pageModel || pageModel.blocks.length === 0) return;
+    if (!pageModel || pageModel.blocks.length === 0 || analyzedTabId === null) return;
     const grade = Number(els.gradeSlider.value) as Grade;
     const format: RewriteFormat = els.bulletsCheckbox.checked ? "bullets" : "prose";
-    const tabId = await getActiveTabId();
+    // Patches are keyed by ids stamped during Analyze, so they only mean anything on that tab.
+    // Rewriting whatever tab happens to be active would no-op, or worse, patch a different page.
+    const tabId = analyzedTabId;
+    if (!(await isActiveTab(tabId))) {
+      els.status.textContent = "This analysis belongs to another tab. Switch back to it, or analyze this page first.";
+      return;
+    }
 
     els.status.textContent = `Rewriting… 0/${pageModel.blocks.length} paragraphs`;
     els.rewriteBtn.disabled = true;
@@ -236,11 +245,16 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
   });
 
   els.restoreBtn.addEventListener("click", async () => {
+    if (analyzedTabId === null) return;
     try {
-      const tabId = await getActiveTabId();
-      await chrome.scripting.executeScript({ target: { tabId }, func: restoreOriginal });
+      const [{ result }] = await chrome.scripting.executeScript({
+        target: { tabId: analyzedTabId },
+        func: restoreOriginal,
+      });
       els.restoreBtn.hidden = true;
-      els.status.textContent = "Original text restored.";
+      els.status.textContent = result
+        ? `Original text restored in ${result} paragraph${result === 1 ? "" : "s"}.`
+        : "Nothing to restore — the page has changed since it was rewritten.";
     } catch (err) {
       els.status.textContent = err instanceof Error ? err.message : "Restore failed.";
     }

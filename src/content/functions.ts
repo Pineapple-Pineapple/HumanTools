@@ -53,7 +53,13 @@ export function applyRewrites(patches: { id: string; text: string }[]): void {
   for (const patch of patches) {
     const el = document.querySelector(`[data-ht-block-id="${patch.id}"]`);
     if (!(el instanceof HTMLElement)) continue;
-    if (!el.title) el.title = el.textContent ?? "";
+    // Stash in a dedicated attribute, never in `title` — a paragraph that already had a tooltip
+    // would otherwise lose its original text and get that tooltip written into its body on restore.
+    if (el.dataset.htOriginal === undefined) {
+      el.dataset.htOriginal = el.textContent ?? "";
+      el.dataset.htPrevTitle = el.title;
+    }
+    el.title = el.dataset.htOriginal;
     el.textContent = patch.text;
     el.classList.add(REWRITTEN_CLASS);
   }
@@ -74,7 +80,12 @@ export function applyBullets(patches: { id: string; bullets: string[] }[]): void
   for (const patch of patches) {
     const el = document.querySelector(`[data-ht-block-id="${patch.id}"]`);
     if (!(el instanceof HTMLElement)) continue;
-    if (!el.title) el.title = el.textContent ?? "";
+    // See applyRewrites: `title` is the hover affordance only, never the source of truth.
+    if (el.dataset.htOriginal === undefined) {
+      el.dataset.htOriginal = el.textContent ?? "";
+      el.dataset.htPrevTitle = el.title;
+    }
+    el.title = el.dataset.htOriginal;
 
     const list = document.createElement("ul");
     list.style.margin = "0";
@@ -126,18 +137,31 @@ export function scrollToAndHighlight(quote: string): boolean {
   return false;
 }
 
-/** Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. */
-export function restoreOriginal(): void {
+/**
+ * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks.
+ * Returns how many paragraphs were put back, so the panel can't claim a restore that didn't happen.
+ */
+export function restoreOriginal(): number {
   const REWRITTEN_CLASS = "__ht-rewritten";
   const STYLE_ID = "__ht-style";
 
+  let restored = 0;
   document.querySelectorAll(`.${REWRITTEN_CLASS}`).forEach((el) => {
     if (!(el instanceof HTMLElement)) return;
-    el.textContent = el.title || el.textContent;
-    el.removeAttribute("title");
+    const original = el.dataset.htOriginal;
+    if (original !== undefined) el.textContent = original;
+
+    const prevTitle = el.dataset.htPrevTitle;
+    if (prevTitle) el.title = prevTitle;
+    else el.removeAttribute("title");
+
+    delete el.dataset.htOriginal;
+    delete el.dataset.htPrevTitle;
     el.classList.remove(REWRITTEN_CLASS);
+    restored += 1;
   });
   document.getElementById(STYLE_ID)?.remove();
+  return restored;
 }
 
 /**
@@ -154,9 +178,22 @@ export function captureInspectTarget(): InspectTarget | null {
   const MAX_LINKS = 30;
   const BLOCK_SELECTOR = "p, li, blockquote, dd, dt, td, th, figcaption, h1, h2, h3, h4, h5, h6, pre";
 
+  const BADGE_CLASS = "__ht-claim-badge";
+
+  // Claim badges are our own spans living inside the page's text, so their digits land in both
+  // Selection.toString() and Element.textContent. Capturing them would put text in the passage
+  // that markClaims later strips, leaving every quote unfindable and every badge unlinked.
+  const textWithoutBadges = (node: Node): string => {
+    const clone = node.cloneNode(true) as Element | DocumentFragment;
+    if (clone instanceof Element || clone instanceof DocumentFragment) {
+      clone.querySelectorAll?.(`.${BADGE_CLASS}`).forEach((b) => b.remove());
+    }
+    return (clone.textContent ?? "").replace(/\s+/g, " ").trim();
+  };
+
   const selection = window.getSelection();
   if (!selection || selection.rangeCount === 0) return null;
-  const text = selection.toString().replace(/\s+/g, " ").trim();
+  const text = textWithoutBadges(selection.getRangeAt(0).cloneContents());
   if (text.length < MIN_CHARS) return null;
 
   const range = selection.getRangeAt(0);
@@ -174,7 +211,7 @@ export function captureInspectTarget(): InspectTarget | null {
       blockId = `ht-i${Math.random().toString(36).slice(2, 10)}`;
       scope.setAttribute("data-ht-inspect-id", blockId);
     }
-    const blockText = (scope.textContent ?? "").replace(/\s+/g, " ").trim();
+    const blockText = textWithoutBadges(scope);
     if (blockText.length >= text.length && blockText.length <= MAX_CHARS * 2) paragraph = blockText;
   }
 

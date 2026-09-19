@@ -24,6 +24,8 @@ const MAX_LINKS = 40;
 interface ConsoleEls {
   root: HTMLElement;
   messages: HTMLElement;
+  pageLabel: HTMLElement;
+  newChatBtn: HTMLButtonElement;
   input: HTMLTextAreaElement;
   sendBtn: HTMLButtonElement;
   status: HTMLElement;
@@ -34,9 +36,24 @@ function renderConsolePanel(container: HTMLElement): ConsoleEls {
   const root = document.createElement("div");
   root.className = "flex flex-col h-full p-4 gap-3 text-sm";
 
+  const headingRow = document.createElement("div");
+  headingRow.className = "flex items-baseline justify-between gap-2";
+
   const heading = document.createElement("h1");
   heading.textContent = "Console — ask the page";
   heading.className = "text-neutral-100 font-medium";
+
+  const newChatBtn = document.createElement("button");
+  newChatBtn.textContent = "New chat";
+  newChatBtn.className = "shrink-0 text-xs text-amber-500 hover:underline";
+
+  headingRow.append(heading, newChatBtn);
+
+  // Which page the answers are about — without this the panel silently keeps answering
+  // about whatever page it first read.
+  const pageLabel = document.createElement("p");
+  pageLabel.className = "text-xs text-neutral-500 truncate";
+  pageLabel.textContent = "No page read yet.";
 
   const messages = document.createElement("div");
   messages.className = "flex-1 flex flex-col gap-3 overflow-y-auto min-h-[8rem]";
@@ -65,10 +82,10 @@ function renderConsolePanel(container: HTMLElement): ConsoleEls {
   optionsLink.textContent = "Set API key";
   optionsLink.className = "self-start text-xs text-amber-500 hover:underline";
 
-  root.append(heading, messages, inputRow, status, optionsLink);
+  root.append(headingRow, pageLabel, messages, inputRow, status, optionsLink);
   container.appendChild(root);
 
-  return { root, messages, input, sendBtn, status, optionsLink };
+  return { root, messages, pageLabel, newChatBtn, input, sendBtn, status, optionsLink };
 }
 
 /** Appends `text` to `container`, rendering **bold**, markdown [text](url) links, and bare URLs. */
@@ -242,18 +259,34 @@ function addBubble(messages: HTMLElement, role: "user" | "assistant"): HTMLEleme
   return bubble;
 }
 
+/** A transcript marker for something the panel did, distinct from either side of the conversation. */
+function addNotice(messages: HTMLElement, text: string): void {
+  const notice = document.createElement("div");
+  notice.className = "self-center max-w-[90%] text-[11px] text-neutral-500 italic text-center";
+  notice.textContent = text;
+  messages.appendChild(notice);
+  messages.scrollTop = messages.scrollHeight;
+}
+
 interface PageContext {
   text: string;
   body: string;
   links: PageLink[];
+  url: string;
+  title: string;
 }
 
-async function buildPageContext(): Promise<PageContext> {
-  const tabId = await getActiveTabId();
+async function buildPageContext(tabId: number, title: string): Promise<PageContext> {
   const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: extractPageBlocks });
-  if (!result || result.blocks.length === 0) return { text: "", body: "", links: [] };
+  if (!result || result.blocks.length === 0) return { text: "", body: "", links: [], url: "", title };
   const body = result.blocks.map((b) => b.text).join("\n\n").slice(0, MAX_CONTEXT_CHARS);
-  return { text: `Page URL: ${result.url}\n\n${body}`, body, links: result.links.slice(0, MAX_LINKS) };
+  return {
+    text: `Page URL: ${result.url}\n\n${body}`,
+    body,
+    links: result.links.slice(0, MAX_LINKS),
+    url: result.url,
+    title,
+  };
 }
 
 function buildSystemPrompt(context: PageContext): string {
@@ -287,7 +320,8 @@ function buildSystemPrompt(context: PageContext): string {
 export function mountConsolePanel(container: HTMLElement): void {
   const els = renderConsolePanel(container);
   const history: ChatTurn[] = [];
-  let contextLoaded = false;
+  /** URL of the page whose text is currently in `history[0]`; null when no page has been read. */
+  let contextUrl: string | null = null;
   let pageBodyText = "";
   let chat: ChatSession | null = null;
   // Read by the chat port's handlers, which are bound once — reassigned at the start of
@@ -311,6 +345,40 @@ export function mountConsolePanel(container: HTMLElement): void {
     chrome.runtime.openOptionsPage();
   });
 
+  els.newChatBtn.addEventListener("click", () => {
+    history.length = 0;
+    contextUrl = null;
+    pageBodyText = "";
+    els.messages.replaceChildren();
+    els.pageLabel.textContent = "No page read yet.";
+    els.status.textContent = "";
+  });
+
+  /**
+   * Puts the current page's text in `history[0]`, replacing any earlier page's. Answers must be
+   * about the page the user is looking at now, not the first one this panel ever saw.
+   */
+  async function loadContextForActiveTab(): Promise<void> {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) throw new Error("No active tab.");
+    if (tab.url && tab.url === contextUrl) return;
+
+    els.status.textContent = "Reading page…";
+    const context = await buildPageContext(tab.id, tab.title ?? "this page");
+    if (!context.text) return;
+
+    const systemTurn: ChatTurn = { role: "system", content: buildSystemPrompt(context) };
+    if (history[0]?.role === "system") history[0] = systemTurn;
+    else history.unshift(systemTurn);
+
+    const switched = contextUrl !== null && contextUrl !== context.url;
+    contextUrl = context.url;
+    pageBodyText = context.body;
+    els.pageLabel.textContent = `Reading: ${context.title}`;
+    els.pageLabel.title = context.url;
+    if (switched) addNotice(els.messages, `Now reading “${context.title}”. Earlier answers were about the previous page.`);
+  }
+
   async function send(): Promise<void> {
     const text = els.input.value.trim();
     if (!text) return;
@@ -319,18 +387,10 @@ export function mountConsolePanel(container: HTMLElement): void {
     els.input.disabled = true;
     els.sendBtn.disabled = true;
 
-    if (!contextLoaded) {
-      els.status.textContent = "Reading page…";
-      try {
-        const context = await buildPageContext();
-        if (context.text) {
-          history.push({ role: "system", content: buildSystemPrompt(context) });
-          pageBodyText = context.body;
-        }
-      } catch {
-        // Proceed without page context if extraction fails (e.g. no accessible tab).
-      }
-      contextLoaded = true;
+    try {
+      await loadContextForActiveTab();
+    } catch {
+      // Proceed without page context if extraction fails (e.g. a chrome:// tab).
     }
 
     history.push({ role: "user", content: text });
