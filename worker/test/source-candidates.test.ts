@@ -9,6 +9,26 @@ async function loadCandidates(): Promise<typeof import("../src/source-candidates
 }
 
 describe("source candidate ranking", () => {
+  it("marks a canonical same-page URL as page context", async () => {
+    const module = await loadCandidates();
+    const classify = (module as unknown as {
+      classifySourceContext?: (fetchedUrl: string, inspectedUrl: string) => string[];
+    } | null)?.classifySourceContext;
+
+    expect(classify).toBeTypeOf("function");
+    expect(classify?.("https://example.test/article?utm_source=search", "https://example.test/article#claim")).toEqual(["page_context"]);
+  });
+
+  it("marks The Onion as non-factual context", async () => {
+    const module = await loadCandidates();
+    const classify = (module as unknown as {
+      classifySourceContext?: (fetchedUrl: string, inspectedUrl: string) => string[];
+    } | null)?.classifySourceContext;
+
+    expect(classify).toBeTypeOf("function");
+    expect(classify?.("https://theonion.com/story", "https://reader.test/article")).toEqual(["non_factual_context"]);
+  });
+
   it("provides the candidate ranking module", async () => {
     expect(await loadCandidates()).not.toBeNull();
   });

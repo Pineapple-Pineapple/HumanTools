@@ -11,8 +11,11 @@ export interface CandidateSource {
   domainScore: number;
 }
 
+export type SourceContextReason = "page_context" | "non_factual_context";
+
 const MAX_CANDIDATES = 5;
 const TRACKING_PARAMETER = /^(utm_|fbclid$|gclid$|mc_[ce]id$)/i;
+const NON_FACTUAL_DOMAINS = new Set(["theonion.com"]);
 
 export function canonicalizeCandidateUrl(value: string): string | null {
   let url: URL;
@@ -32,6 +35,18 @@ export function canonicalizeCandidateUrl(value: string): string | null {
     if (TRACKING_PARAMETER.test(key)) url.searchParams.delete(key);
   }
   return url.toString().replace(/\?$/, "");
+}
+
+/** Explains why an exact quote cannot serve as eligible external evidence. */
+export function classifySourceContext(fetchedUrl: string, inspectedUrl: string): SourceContextReason[] {
+  const fetched = canonicalizeCandidateUrl(fetchedUrl);
+  const inspected = canonicalizeCandidateUrl(inspectedUrl);
+  if (fetched === null) return [];
+
+  const reasons: SourceContextReason[] = [];
+  if (fetched === inspected) reasons.push("page_context");
+  if (NON_FACTUAL_DOMAINS.has(new URL(fetched).hostname.replace(/^www\./, ""))) reasons.push("non_factual_context");
+  return reasons;
 }
 
 function primarySourceScore(url: string): number {

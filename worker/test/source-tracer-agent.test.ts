@@ -23,6 +23,36 @@ const nonMatchingCandidate: CandidateSource = {
 };
 
 describe("source tracer", () => {
+  it("keeps a same-page exact match as context instead of verified evidence", async () => {
+    const module = await loadTracer();
+    expect(module).not.toBeNull();
+    const indexed: string[] = [];
+    const tracer = module!.makeSourceTracer({
+      search: async () => [matchingCandidate],
+      fetch: async () => ({
+        title: "Inspected article",
+        url: "https://page.test/article?utm_source=search",
+        text: "Revenue increased from $1 million to $4 million in 2025.",
+      }),
+      index: async (source) => {
+        indexed.push(source.url);
+      },
+    });
+
+    const outcome = await tracer.trace({
+      claim: "Revenue rose substantially.",
+      verifiedQuote: "revenue increased from $1 million to $4 million",
+      page: { url: "https://page.test/article#selected", title: "Article" },
+      installId: "install-1",
+    });
+    const contexts = (outcome as typeof outcome & { contexts?: Array<{ contextReasons: string[] }> }).contexts;
+
+    expect(outcome.sources).toEqual([]);
+    expect(indexed).toEqual([]);
+    expect(contexts).toEqual([expect.objectContaining({ contextReasons: ["page_context"] })]);
+    expect(outcome.trace).toContainEqual(expect.objectContaining({ step: "Source verifier", state: "skipped", detail: "Page context only." }));
+  });
+
   it("indexes and returns only sources whose fetched text verifies the quote", async () => {
     const module = await loadTracer();
     expect(module).not.toBeNull();

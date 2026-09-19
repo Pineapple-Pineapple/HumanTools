@@ -1,6 +1,6 @@
 import type { FetchedSource } from "./browserbase-fetch";
 import type { VerifiedSource } from "./elastic-index";
-import type { CandidateSource } from "./source-candidates";
+import { classifySourceContext, type CandidateSource, type SourceContextReason } from "./source-candidates";
 import { verifySourceExcerpt } from "./source-verify";
 import type { SourceTraceRequest } from "./types";
 
@@ -15,6 +15,7 @@ export interface SourceTraceEvent {
 }
 
 export type TracedSource = VerifiedSource & { verification: "verified" };
+export type ContextSource = VerifiedSource & { verification: "context"; contextReasons: SourceContextReason[] };
 
 export interface SourceTracerDependencies {
   search: (request: SourceTraceRequest) => Promise<CandidateSource[]>;
@@ -24,7 +25,12 @@ export interface SourceTracerDependencies {
 
 export interface SourceTraceOutcome {
   sources: TracedSource[];
+  contexts: ContextSource[];
   trace: SourceTraceEvent[];
+}
+
+function contextDetail(reasons: readonly SourceContextReason[]): string {
+  return reasons.map((reason) => reason === "page_context" ? "Page context only." : "Known non-factual publisher.").join(" ");
 }
 
 function host(url: string): string {
@@ -68,10 +74,10 @@ export function makeSourceTracer(
         report("Source search", "done", `${candidates.length} candidates`, Date.now() - searchStarted);
       } catch (error) {
         report("Source search", "failed", error instanceof Error ? error.message : "Search failed.", Date.now() - searchStarted);
-        return { sources: [], trace };
+        return { sources: [], contexts: [], trace };
       }
 
-      const inspected = await mapWithConcurrency(candidates, 2, async (candidate): Promise<TracedSource | null> => {
+      const inspected = await mapWithConcurrency(candidates, 2, async (candidate): Promise<TracedSource | ContextSource | null> => {
         report("Source fetch", "running", host(candidate.url));
         const fetchStarted = Date.now();
         let fetched: FetchedSource;
@@ -89,6 +95,19 @@ export function makeSourceTracer(
           report("Source verifier", "skipped", "No matching source excerpt.");
           return null;
         }
+        const contextReasons = classifySourceContext(fetched.url, request.page.url);
+        if (contextReasons.length) {
+          report("Source verifier", "skipped", contextDetail(contextReasons));
+          return {
+            title: fetched.title,
+            url: fetched.url,
+            excerpt: excerpt.excerpt,
+            publisher: host(fetched.url),
+            verifiedAt: new Date().toISOString(),
+            verification: "context",
+            contextReasons,
+          };
+        }
         report("Source verifier", "done", host(fetched.url));
         return {
           title: fetched.title,
@@ -100,10 +119,11 @@ export function makeSourceTracer(
         };
       });
 
-      const sources = inspected.filter((source): source is TracedSource => source !== null);
+      const sources = inspected.filter((source): source is TracedSource => source?.verification === "verified");
+      const contexts = inspected.filter((source): source is ContextSource => source?.verification === "context");
       if (sources.length === 0) {
         report("Source index", "skipped", "No verified sources to index.");
-        return { sources, trace };
+        return { sources, contexts, trace };
       }
 
       report("Source index", "running", `${sources.length} verified sources`);
@@ -114,7 +134,7 @@ export function makeSourceTracer(
       } catch (error) {
         report("Source index", "failed", error instanceof Error ? error.message : "Indexing failed.", Date.now() - indexStarted);
       }
-      return { sources, trace };
+      return { sources, contexts, trace };
     },
   };
 }
