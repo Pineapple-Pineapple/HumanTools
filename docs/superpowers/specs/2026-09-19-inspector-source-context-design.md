@@ -1,0 +1,44 @@
+# Inspector Source Context Design
+
+## Goal
+
+Make it unmistakable whether a claim's matching text comes from the inspected page, an eligible external source, or a known non-factual publisher. A page must never validate itself.
+
+## Source Classification
+
+The Source Tracer classifies a fetched exact-quote match after Browserbase resolves its final URL.
+
+| Classification | Rule | Evidence meaning |
+| --- | --- | --- |
+| `external_verified` | Its canonical resolved URL differs from the inspected page and its domain is not on the non-factual list. | Eligible external evidence. |
+| `page_context` | Its canonical resolved URL is the inspected page. | Confirms only that the inspected page contains the text. |
+| `non_factual_context` | Its domain is in the known non-factual publisher list. | Context only; never evidence for a factual claim. |
+
+Canonical comparison removes fragments and tracking parameters before comparing URLs. The comparison happens after fetch so redirects back to the inspected page cannot evade it.
+
+## Eligibility and Storage
+
+Only `external_verified` sources are returned through the existing verified-source channel and indexed in `human-tools-sources`. Page and non-factual context are returned separately and are never indexed as verified evidence.
+
+The first non-factual publisher is `theonion.com`. The list is an explicit annotation layer, not the system's primary trust rule: URL distinction is always required for external verification.
+
+## Inspector Presentation
+
+Each claim has two sections:
+
+1. **Page context — not verification** shows a same-page exact match and explains that it cannot support the page's own claim.
+2. **External verification** shows only eligible external sources, each marked “Exact quote verified on external source.”
+
+Known non-factual matches appear in the page-context section with “Known satire/non-factual publisher — not evidence for this claim.” When no eligible external source exists, the external section says “No external verification found.” The claim remains Unverified; absence of evidence is not evidence of falsity.
+
+## Trace and Errors
+
+The trace emits a skipped verifier event when a source is retained as page or non-factual context, with a reason that maps to the Inspector copy. Search, browser loading, quote matching, and Elastic indexing behavior otherwise stay unchanged.
+
+## Tests
+
+- A fetched same-page URL is returned as `page_context`, not indexed, and never appears among verified sources.
+- A redirect resolving to the inspected canonical URL gets the same treatment.
+- A `theonion.com` match is returned as `non_factual_context`, not indexed, and never appears among verified sources.
+- A distinct eligible source remains verified and indexed.
+- Client parsing preserves context items separately from verified sources.
