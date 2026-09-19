@@ -44,8 +44,11 @@ mountInspectorPanel(inspectorContainer, { activate: () => select("Inspector") })
 mountSecurityPanel(securityContainer);
 mountApplicationPanel(applicationContainer);
 
-// Reopen on the panel the reader left, not always Accessibility.
-select("Accessibility");
-chrome.storage.local.get(LAST_PANEL_KEY).then(({ lastPanel }) => {
-  if (typeof lastPanel === "string" && lastPanel in panels) select(lastPanel);
-});
+// Reopen on the panel the reader left. Nothing is selected until storage answers: selecting a
+// default first would fire the callback above and overwrite the very value being read back.
+for (const el of Object.values(panels)) el.hidden = true;
+chrome.storage.local
+  .get(LAST_PANEL_KEY)
+  .then(({ lastPanel }) => (typeof lastPanel === "string" && lastPanel in panels ? lastPanel : "Accessibility"))
+  .catch(() => "Accessibility")
+  .then(select);
