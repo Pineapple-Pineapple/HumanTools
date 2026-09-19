@@ -21,6 +21,10 @@ export default defineManifest({
     default_path: "src/sidepanel/index.html",
   },
   options_page: "src/options/index.html",
-  permissions: ["activeTab", "scripting", "storage", "sidePanel"],
-  host_permissions: ["https://openrouter.ai/*"],
+  // activeTab alone only grants page access for the exact tab active at the moment
+  // the toolbar icon is clicked; since the side panel stays open across tab switches
+  // and Analyze/Rewrite/Restore happen well after that click, declared host_permissions
+  // are needed for chrome.scripting.executeScript to reliably reach the active tab later.
+  permissions: ["scripting", "storage", "sidePanel"],
+  host_permissions: ["http://*/*", "https://*/*"],
 });
