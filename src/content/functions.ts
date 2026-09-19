@@ -1,4 +1,4 @@
-import type { PageModel } from "../lib/types";
+import type { InspectTarget, OutlineBlock, OutlineLabel, PageModel } from "../lib/types";
 
 /**
  * Self-contained: invoked via chrome.scripting.executeScript by reference, so
@@ -138,4 +138,474 @@ export function restoreOriginal(): void {
     el.classList.remove(REWRITTEN_CLASS);
   });
   document.getElementById(STYLE_ID)?.remove();
+}
+
+/**
+ * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. Captures the
+ * reader's current selection for the Inspector: the text, its containing block (tagged with
+ * `data-ht-inspect-id` so claim markers can be placed there later), the page's publish date, and
+ * the outbound links that back it. Same-page footnote links (Wikipedia's "[1]") are followed to
+ * the reference they point at, so the citation's real external source is captured instead.
+ * Returns null when nothing meaningful is selected.
+ */
+export function captureInspectTarget(): InspectTarget | null {
+  const MIN_CHARS = 20;
+  const MAX_CHARS = 4000;
+  const MAX_LINKS = 30;
+  const BLOCK_SELECTOR = "p, li, blockquote, dd, dt, td, th, figcaption, h1, h2, h3, h4, h5, h6, pre";
+
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return null;
+  const text = selection.toString().replace(/\s+/g, " ").trim();
+  if (text.length < MIN_CHARS) return null;
+
+  const range = selection.getRangeAt(0);
+  const common = range.commonAncestorContainer;
+  const commonEl = common instanceof Element ? common : common.parentElement;
+  const block = commonEl?.closest(BLOCK_SELECTOR) ?? commonEl;
+
+  let blockId: string | null = null;
+  let paragraph = text;
+  const scope: Element =
+    block instanceof HTMLElement && block !== document.body && block !== document.documentElement ? block : document.body;
+  if (scope !== document.body) {
+    blockId = scope.getAttribute("data-ht-inspect-id");
+    if (!blockId) {
+      blockId = `ht-i${Math.random().toString(36).slice(2, 10)}`;
+      scope.setAttribute("data-ht-inspect-id", blockId);
+    }
+    const blockText = (scope.textContent ?? "").replace(/\s+/g, " ").trim();
+    if (blockText.length >= text.length && blockText.length <= MAX_CHARS * 2) paragraph = blockText;
+  }
+
+  const pageUrl = location.href.split("#")[0];
+  const links = new Map<string, string>();
+  const addLink = (href: string, label: string) => {
+    if (links.size >= MAX_LINKS || !/^https?:\/\//i.test(href) || href.split("#")[0] === pageUrl) return;
+    if (!links.has(href)) links.set(href, label.replace(/\s+/g, " ").trim().slice(0, 160) || href);
+  };
+
+  scope.querySelectorAll("a[href]").forEach((a) => {
+    if (!(a instanceof HTMLAnchorElement)) return;
+    if (scope === document.body && !range.intersectsNode(a)) return;
+    const href = a.href;
+    const [base, fragment] = href.split("#");
+    if (base === pageUrl && fragment) {
+      // A footnote marker: collect the external links in the reference it points to.
+      let note: HTMLElement | null = null;
+      try {
+        note = document.getElementById(decodeURIComponent(fragment));
+      } catch {
+        note = null;
+      }
+      if (!note) return;
+      const noteText = note.textContent ?? "";
+      let taken = 0;
+      note.querySelectorAll("a[href]").forEach((ref) => {
+        if (taken >= 2 || !(ref instanceof HTMLAnchorElement)) return;
+        if (ref.hostname === location.hostname) return;
+        addLink(ref.href, noteText);
+        taken++;
+      });
+      return;
+    }
+    addLink(href, a.textContent ?? "");
+  });
+
+  const meta = (selector: string) => document.querySelector(selector)?.getAttribute("content") || undefined;
+  let publishedAt =
+    meta('meta[property="article:published_time"]') ??
+    meta('meta[itemprop="datePublished"]') ??
+    meta('meta[name="date"]') ??
+    meta('meta[name="pubdate"]') ??
+    (document.querySelector("time[datetime]")?.getAttribute("datetime") || undefined);
+  if (!publishedAt) {
+    for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+      try {
+        const json = JSON.parse(script.textContent ?? "");
+        const items = Array.isArray(json) ? json : [json, ...(Array.isArray(json?.["@graph"]) ? json["@graph"] : [])];
+        const found = items.find((item: { datePublished?: unknown }) => typeof item?.datePublished === "string");
+        if (found) {
+          publishedAt = found.datePublished;
+          break;
+        }
+      } catch {
+        // Malformed JSON-LD — ignore it.
+      }
+    }
+  }
+
+  return {
+    text: text.slice(0, MAX_CHARS),
+    paragraph: paragraph.slice(0, MAX_CHARS),
+    blockId,
+    url: location.href,
+    title: document.title,
+    publishedAt,
+    links: Array.from(links, ([href, label]) => ({ href, text: label })),
+  };
+}
+
+/**
+ * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. The
+ * Inspector's crosshair: hovering a block outlines it and underlines its claim-bearing sentences
+ * (via the CSS Highlight API, so the page's DOM is never rewritten); clicking selects the block's
+ * text and tells the side panel it was picked. Escape cancels. Calling it again restarts cleanly.
+ */
+export function startPickMode(): void {
+  const STYLE_ID = "__ht-pick-style";
+  const HOVER_CLASS = "__ht-pick-hover";
+  const ROOT_CLASS = "__ht-picking";
+  const HIGHLIGHT_NAME = "__ht-claim-cue";
+  const BLOCK_SELECTOR = "p, li, blockquote, dd, dt, td, th, figcaption, h1, h2, h3, h4, h5, h6, pre";
+  const CLAIM_CUE =
+    /\d|%|\b(according to|study|survey|report(?:s|ed)?|percent|increase[sd]?|decrease[sd]?|doubled|tripled|million|billion|found that|shows? that|estimated?|first|largest|most|least)\b/i;
+
+  const w = window as unknown as { __htPick?: { stop: () => void } };
+  w.__htPick?.stop();
+
+  if (!document.getElementById(STYLE_ID)) {
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent =
+      `.${HOVER_CLASS} { outline: 2px solid #f59e0b !important; outline-offset: 2px !important; } ` +
+      `html.${ROOT_CLASS}, html.${ROOT_CLASS} * { cursor: crosshair !important; } ` +
+      `::highlight(${HIGHLIGHT_NAME}) { text-decoration: underline dotted #f59e0b; text-decoration-thickness: 2px; }`;
+    document.head.appendChild(style);
+  }
+  document.documentElement.classList.add(ROOT_CLASS);
+
+  let hovered: HTMLElement | null = null;
+
+  function claimRanges(block: HTMLElement): Range[] {
+    const ranges: Range[] = [];
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const data = node.textContent ?? "";
+      const sentence = /[^.!?]+[.!?]*/g;
+      let m: RegExpExecArray | null;
+      while ((m = sentence.exec(data))) {
+        if (m[0].trim().length < 12 || !CLAIM_CUE.test(m[0])) continue;
+        const r = document.createRange();
+        r.setStart(node, m.index);
+        r.setEnd(node, m.index + m[0].length);
+        ranges.push(r);
+      }
+    }
+    return ranges;
+  }
+
+  function setHovered(next: HTMLElement | null): void {
+    if (next === hovered) return;
+    hovered?.classList.remove(HOVER_CLASS);
+    CSS.highlights?.delete(HIGHLIGHT_NAME);
+    hovered = next;
+    if (!hovered) return;
+    hovered.classList.add(HOVER_CLASS);
+    const ranges = claimRanges(hovered);
+    if (ranges.length && typeof Highlight !== "undefined") CSS.highlights.set(HIGHLIGHT_NAME, new Highlight(...ranges));
+  }
+
+  function onOver(e: MouseEvent): void {
+    const el = e.target instanceof Element ? e.target.closest(BLOCK_SELECTOR) : null;
+    const usable = el instanceof HTMLElement && (el.textContent ?? "").trim().length >= 20;
+    setHovered(usable ? el : null);
+  }
+
+  function onClick(e: MouseEvent): void {
+    if (!hovered) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const picked = hovered;
+    stop();
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    const range = document.createRange();
+    range.selectNodeContents(picked);
+    selection?.addRange(range);
+    chrome.runtime.sendMessage({ type: "HT_PICKED" }).catch(() => {});
+  }
+
+  function onKey(e: KeyboardEvent): void {
+    if (e.key !== "Escape") return;
+    stop();
+    chrome.runtime.sendMessage({ type: "HT_PICK_CANCELLED" }).catch(() => {});
+  }
+
+  function stop(): void {
+    document.removeEventListener("mouseover", onOver, true);
+    document.removeEventListener("click", onClick, true);
+    document.removeEventListener("keydown", onKey, true);
+    setHovered(null);
+    document.documentElement.classList.remove(ROOT_CLASS);
+    document.getElementById(STYLE_ID)?.remove();
+    delete w.__htPick;
+  }
+
+  document.addEventListener("mouseover", onOver, true);
+  document.addEventListener("click", onClick, true);
+  document.addEventListener("keydown", onKey, true);
+  w.__htPick = { stop };
+}
+
+/** Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. */
+export function stopPickMode(): void {
+  (window as unknown as { __htPick?: { stop: () => void } }).__htPick?.stop();
+}
+
+/**
+ * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. Marks each
+ * claim's quote inside the inspected block: a soft highlight (CSS Highlight API) plus a small
+ * numbered badge colored by evidence status. Clicking a badge tells the side panel which claim.
+ * Replaces any previous marks. Returns how many claims were found on the page.
+ */
+export function markClaims(blockId: string | null, claims: { n: number; quote: string; status: string }[]): number {
+  const STYLE_ID = "__ht-inspect-style";
+  const BADGE_CLASS = "__ht-claim-badge";
+  const HIGHLIGHT_NAME = "__ht-claim-quote";
+  const COLORS: Record<string, string> = {
+    supported: "#22c55e",
+    partly_supported: "#f59e0b",
+    unverified: "#a3a3a3",
+    contradicted: "#ef4444",
+  };
+  const LABELS: Record<string, string> = {
+    supported: "Supported",
+    partly_supported: "Partly supported",
+    unverified: "Unverified",
+    contradicted: "Contradicted",
+  };
+
+  document.querySelectorAll(`.${BADGE_CLASS}`).forEach((b) => b.remove());
+  CSS.highlights?.delete(HIGHLIGHT_NAME);
+
+  if (!document.getElementById(STYLE_ID)) {
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent =
+      `.${BADGE_CLASS} { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; ` +
+      `height: 16px; padding: 0 4px; margin-left: 2px; border-radius: 999px; background: #171717; ` +
+      `border: 1.5px solid var(--ht-c); color: var(--ht-c); font: 700 10px/1 system-ui, sans-serif; ` +
+      `vertical-align: super; cursor: pointer; user-select: none; text-decoration: none; } ` +
+      `::highlight(${HIGHLIGHT_NAME}) { background-color: rgba(245, 158, 11, 0.22); }`;
+    document.head.appendChild(style);
+  }
+
+  const root =
+    (blockId && document.querySelector(`[data-ht-inspect-id="${CSS.escape(blockId)}"]`)) || document.body;
+
+  // A whitespace-collapsed, lowercased view of the block's text, mapped back to DOM positions.
+  const chars: string[] = [];
+  const positions: { node: Text; offset: number }[] = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) =>
+      n.parentElement?.closest(`.${BADGE_CLASS}, script, style`) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+  });
+  let prevSpace = true;
+  for (let node = walker.nextNode() as Text | null; node; node = walker.nextNode() as Text | null) {
+    const data = node.data;
+    for (let i = 0; i < data.length; i++) {
+      const isSpace = /\s/.test(data[i]);
+      if (isSpace && prevSpace) continue;
+      chars.push(isSpace ? " " : data[i].toLowerCase());
+      positions.push({ node, offset: i });
+      prevSpace = isSpace;
+    }
+  }
+  const haystack = chars.join("");
+
+  const found: { n: number; status: string; at: number; start: { node: Text; offset: number }; end: { node: Text; offset: number } }[] = [];
+  for (const claim of claims) {
+    const needle = claim.quote.replace(/\s+/g, " ").trim().toLowerCase();
+    const at = needle ? haystack.indexOf(needle) : -1;
+    if (at === -1) continue;
+    const last = positions[at + needle.length - 1];
+    found.push({ n: claim.n, status: claim.status, at, start: positions[at], end: { node: last.node, offset: last.offset + 1 } });
+  }
+
+  const ranges = found.map((f) => {
+    const r = document.createRange();
+    r.setStart(f.start.node, f.start.offset);
+    r.setEnd(f.end.node, f.end.offset);
+    return r;
+  });
+  if (ranges.length && typeof Highlight !== "undefined") CSS.highlights.set(HIGHLIGHT_NAME, new Highlight(...ranges));
+
+  // Insert badges from the last match backward, so splitting a text node never shifts a
+  // position that an earlier match still depends on.
+  for (const f of [...found].sort((a, b) => b.at - a.at)) {
+    const badge = document.createElement("span");
+    badge.className = BADGE_CLASS;
+    badge.textContent = String(f.n);
+    badge.title = `Claim ${f.n} · ${LABELS[f.status] ?? f.status} — click to open it in Human Tools`;
+    badge.style.setProperty("--ht-c", COLORS[f.status] ?? "#a3a3a3");
+    badge.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      chrome.runtime.sendMessage({ type: "HT_CLAIM_CLICK", n: f.n }).catch(() => {});
+    });
+    const at = document.createRange();
+    at.setStart(f.end.node, f.end.offset);
+    at.collapse(true);
+    at.insertNode(badge);
+  }
+
+  return found.length;
+}
+
+/** Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. */
+export function clearClaimMarks(): void {
+  document.querySelectorAll(".__ht-claim-badge").forEach((b) => b.remove());
+  CSS.highlights?.delete("__ht-claim-quote");
+  document.getElementById("__ht-inspect-style")?.remove();
+}
+
+/**
+ * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. Scrolls the
+ * first element matching `selector` into view and flashes it. Returns whether one was found.
+ */
+export function flashBySelector(selector: string): boolean {
+  const FLASH_CLASS = "__ht-flash";
+  const STYLE_ID = "__ht-flash-style";
+
+  if (!document.getElementById(STYLE_ID)) {
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent =
+      `.${FLASH_CLASS} { animation: __ht-flash-anim 1.6s ease-out; } ` +
+      `@keyframes __ht-flash-anim { 0% { background: rgba(245,158,11,.5); } 100% { background: transparent; } }`;
+    document.head.appendChild(style);
+  }
+
+  const el = document.querySelector(selector);
+  if (!(el instanceof HTMLElement)) return false;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.remove(FLASH_CLASS);
+  void el.offsetWidth; // force reflow so the animation restarts on repeat clicks
+  el.classList.add(FLASH_CLASS);
+  setTimeout(() => el.classList.remove(FLASH_CLASS), 1700);
+  return true;
+}
+
+/**
+ * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. Builds the
+ * Inspector's Outline: the page's visible blocks in order (headings, paragraphs, lists, tables,
+ * figures, and whole nav/header/footer/aside containers), each tagged with `data-ht-outline-id`,
+ * with a first-pass label from DOM signals alone — nav elements, ad-like ids/classes and iframes
+ * are labeled with confidence (`fixed`); site chrome is a guess the model may revise; everything
+ * else starts as "supporting" until the model picks out what's important.
+ */
+export function extractOutline(): { title: string; blocks: OutlineBlock[] } {
+  const MAX_BLOCKS = 250;
+  const CANDIDATES =
+    "h1,h2,h3,h4,h5,h6,p,ul,ol,dl,blockquote,table,figure,pre,iframe,nav,header,footer,aside,form," +
+    "[role=navigation],[role=banner],[role=contentinfo],[role=complementary],[role=search]";
+  const NAV_SELECTOR = "nav,[role=navigation],[role=search]";
+  const CHROME_SELECTOR = "aside,form,[role=banner],[role=contentinfo],[role=complementary]";
+  const AD_RE = /(^|[\s_-])(ads?|advert\w*|sponsor\w*|promo\w*|dfp|adslot|adunit|outbrain|taboola)([\s_-]|$)/i;
+  const BOILER_RE = /(cookie|consent|newsletter|subscribe|share|social|related|recommend|comment|breadcrumb|sidebar|signup|paywall|popup|modal|byline)/i;
+
+  const signature = (el: Element) => `${el.id} ${el.getAttribute("class") ?? ""} ${el.getAttribute("aria-label") ?? ""}`;
+  const nearbyMatches = (el: Element, re: RegExp, depth: number) => {
+    let cur: Element | null = el;
+    for (let i = 0; cur && i < depth; i++, cur = cur.parentElement) if (re.test(signature(cur))) return true;
+    return false;
+  };
+  const isSiteChrome = (el: Element) =>
+    el.matches(CHROME_SELECTOR) || (el.matches("header,footer") && !el.closest("main,article"));
+
+  document.querySelectorAll("[data-ht-outline-id]").forEach((el) => {
+    el.removeAttribute("data-ht-outline-id");
+    el.removeAttribute("data-ht-outline-label");
+  });
+
+  const taken = new Set<Element>();
+  const raw: { el: Element; tag: string; text: string; label: OutlineLabel; fixed: boolean; level: number | null }[] = [];
+
+  for (const el of document.body.querySelectorAll(CANDIDATES)) {
+    if (raw.length >= MAX_BLOCKS) break;
+    let inside = false;
+    for (let anc = el.parentElement; anc; anc = anc.parentElement) {
+      if (taken.has(anc)) {
+        inside = true;
+        break;
+      }
+    }
+    if (inside || el.closest(".__ht-claim-badge")) continue;
+
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) continue;
+
+    const tag = el.tagName.toLowerCase();
+    const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+    const level = /^h[1-6]$/.test(tag) ? Number(tag[1]) : null;
+    const isNav = el.matches(NAV_SELECTOR);
+    const isChrome = isSiteChrome(el);
+    const minChars = level !== null ? 2 : 25;
+    if (!isNav && !isChrome && !["iframe", "table", "figure"].includes(tag) && text.length < minChars) continue;
+
+    let label: OutlineLabel = "supporting";
+    let fixed = false;
+    if (tag === "iframe" || nearbyMatches(el, AD_RE, 4)) {
+      label = "advertisement";
+      fixed = true;
+    } else if (isNav) {
+      label = "navigation";
+      fixed = true;
+    } else if (isChrome || nearbyMatches(el, BOILER_RE, 3)) {
+      label = "boilerplate";
+    }
+
+    taken.add(el);
+    raw.push({ el, tag, text: text.slice(0, 300), label, fixed, level });
+  }
+
+  const headingLevels = raw.flatMap((r) => (r.level === null ? [] : [r.level]));
+  const minLevel = headingLevels.length ? Math.min(...headingLevels) : 1;
+  let headingDepth = -1;
+  const blocks: OutlineBlock[] = raw.map((r, i) => {
+    const id = `ht-o${i}`;
+    r.el.setAttribute("data-ht-outline-id", id);
+    r.el.setAttribute("data-ht-outline-label", r.label);
+    let depth: number;
+    if (r.level !== null) {
+      depth = r.level - minLevel;
+      headingDepth = depth;
+    } else {
+      depth = headingDepth + 1;
+    }
+    return { id, tag: r.tag, depth: Math.max(0, depth), text: r.text || `<${r.tag}>`, label: r.label, fixed: r.fixed };
+  });
+
+  return { title: document.title, blocks };
+}
+
+/**
+ * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. Records the
+ * outline labels on their page elements and, when `show` is true, outlines each block on the page
+ * by label; `show` false removes those outlines (the attributes are harmless and stay).
+ */
+export function applyOutlineLabels(labels: { id: string; label: string }[], show: boolean): void {
+  const STYLE_ID = "__ht-outline-style";
+  for (const { id, label } of labels) {
+    document.querySelector(`[data-ht-outline-id="${CSS.escape(id)}"]`)?.setAttribute("data-ht-outline-label", label);
+  }
+
+  const existing = document.getElementById(STYLE_ID);
+  if (!show) {
+    existing?.remove();
+    return;
+  }
+  if (existing) return;
+  const style = document.createElement("style");
+  style.id = STYLE_ID;
+  style.textContent =
+    `[data-ht-outline-label="important"] { outline: 2px solid #f59e0b !important; outline-offset: 3px !important; } ` +
+    `[data-ht-outline-label="supporting"] { outline: 1px dashed rgba(163,163,163,.6) !important; outline-offset: 3px !important; } ` +
+    `[data-ht-outline-label="advertisement"] { outline: 2px dashed #ef4444 !important; outline-offset: 3px !important; } ` +
+    `[data-ht-outline-label="navigation"] { outline: 1px dotted #60a5fa !important; outline-offset: 3px !important; } ` +
+    `[data-ht-outline-label="boilerplate"] { outline: 1px dotted #737373 !important; outline-offset: 3px !important; }`;
+  document.head.appendChild(style);
 }

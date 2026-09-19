@@ -1,7 +1,7 @@
 export const PANEL_NAMES = [
   "Accessibility",
   "Console",
-  "Elements",
+  "Inspector",
   "Network",
   "Memory",
   "Performance",
@@ -10,7 +10,7 @@ export const PANEL_NAMES = [
   "Application",
 ] as const;
 
-const ENABLED_PANELS = new Set<string>(["Accessibility", "Console"]);
+const ENABLED_PANELS = new Set<string>(["Accessibility", "Console", "Inspector"]);
 
 const ACTIVE_CLASS = "shrink-0 whitespace-nowrap px-3 py-2 border-b-2 border-amber-500 text-neutral-100 font-medium";
 const INACTIVE_CLASS =

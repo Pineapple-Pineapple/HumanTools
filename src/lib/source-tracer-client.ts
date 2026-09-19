@@ -14,17 +14,36 @@ export interface VerifiedSource {
   excerpt: string;
   publisher: string;
   verifiedAt: string;
+  sourceQuality: SourceQuality;
   verification: "verified";
+}
+
+export type SourceContextReason = "page_context" | "non_factual_context";
+export type SourceQuality = "institutional_signal" | "credibility_unassessed";
+
+export interface ContextSource {
+  title: string;
+  url: string;
+  excerpt: string;
+  publisher: string;
+  verifiedAt: string;
+  verification: "context";
+  contextReasons: SourceContextReason[];
 }
 
 export interface SourceTraceResult {
   trace: SourceTraceEvent[];
   sources: VerifiedSource[];
+  contexts: ContextSource[];
 }
 
-function verifiedSource(value: unknown): VerifiedSource | null {
+function contextSource(value: unknown): ContextSource | null {
   if (typeof value !== "object" || value === null) return null;
   const source = value as Record<string, unknown>;
+  const reasons = source.contextReasons;
+  const validReasons = Array.isArray(reasons) && reasons.length > 0 && reasons.every(
+    (reason): reason is SourceContextReason => reason === "page_context" || reason === "non_factual_context",
+  );
   return (
     typeof source.title === "string" &&
     typeof source.url === "string" &&
@@ -32,6 +51,34 @@ function verifiedSource(value: unknown): VerifiedSource | null {
     typeof source.excerpt === "string" &&
     typeof source.publisher === "string" &&
     typeof source.verifiedAt === "string" &&
+    source.verification === "context" &&
+    validReasons
+  )
+    ? {
+        title: source.title,
+        url: source.url,
+        excerpt: source.excerpt,
+        publisher: source.publisher,
+        verifiedAt: source.verifiedAt,
+        verification: source.verification,
+        contextReasons: reasons,
+      }
+    : null;
+}
+
+function verifiedSource(value: unknown): VerifiedSource | null {
+  if (typeof value !== "object" || value === null) return null;
+  const source = value as Record<string, unknown>;
+  const sourceQuality = source.sourceQuality;
+  const validQuality = sourceQuality === "institutional_signal" || sourceQuality === "credibility_unassessed";
+  return (
+    typeof source.title === "string" &&
+    typeof source.url === "string" &&
+    source.url.startsWith("https://") &&
+    typeof source.excerpt === "string" &&
+    typeof source.publisher === "string" &&
+    typeof source.verifiedAt === "string" &&
+    validQuality &&
     source.verification === "verified"
   )
     ? {
@@ -40,6 +87,7 @@ function verifiedSource(value: unknown): VerifiedSource | null {
         excerpt: source.excerpt,
         publisher: source.publisher,
         verifiedAt: source.verifiedAt,
+        sourceQuality,
         verification: source.verification,
       }
     : null;
@@ -64,10 +112,11 @@ function traceEvent(value: unknown): SourceTraceEvent | null {
 export function parseSourceTraceLines(lines: readonly string[]): SourceTraceResult {
   const trace: SourceTraceEvent[] = [];
   let sources: VerifiedSource[] = [];
+  let contexts: ContextSource[] = [];
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
-      const message = JSON.parse(line) as { type?: unknown; sources?: unknown };
+      const message = JSON.parse(line) as { type?: unknown; sources?: unknown; contexts?: unknown };
       const event = traceEvent(message);
       if (event) trace.push(event);
       if (message.type === "SOURCE_TRACE_DONE" && Array.isArray(message.sources)) {
@@ -75,12 +124,18 @@ export function parseSourceTraceLines(lines: readonly string[]): SourceTraceResu
           const verified = verifiedSource(source);
           return verified ? [verified] : [];
         });
+        contexts = Array.isArray(message.contexts)
+          ? message.contexts.flatMap((source) => {
+              const context = contextSource(source);
+              return context ? [context] : [];
+            })
+          : [];
       }
     } catch {
       // A malformed streaming record is ignored; it cannot become evidence.
     }
   }
-  return { trace, sources };
+  return { trace, sources, contexts };
 }
 
 export async function requestSourceTrace(
@@ -88,7 +143,7 @@ export async function requestSourceTrace(
   request: { claim: string; verifiedQuote: string; page: { url: string; title: string }; installId: string },
   onTrace: (event: SourceTraceEvent) => void,
   signal?: AbortSignal,
-): Promise<VerifiedSource[]> {
+): Promise<SourceTraceResult> {
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -115,5 +170,5 @@ export async function requestSourceTrace(
     if (done) break;
   }
   if (remainder) lines.push(remainder);
-  return parseSourceTraceLines(lines).sources;
+  return parseSourceTraceLines(lines);
 }

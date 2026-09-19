@@ -1,4 +1,5 @@
-import type { Block, Grade, RewriteFormat } from "./types";
+import type { Block, ClaimCard, Grade, InspectTarget, OutlineLabel, RewriteFormat, SlopReport } from "./types";
+import type { ContextSource, VerifiedSource } from "./source-tracer-client";
 
 export interface RewritePatch {
   id: string;
@@ -142,4 +143,119 @@ export function openChatPort(handlers: ChatHandlers): ChatSession {
     },
     close: () => port.disconnect(),
   };
+}
+
+export type TraceState = "running" | "done" | "skipped" | "failed";
+
+/** One step of the Inspector pipeline, shown in the card's trace so each stage's work is visible. */
+export interface InspectTrace {
+  type: "INSPECT_TRACE";
+  step: string;
+  state: TraceState;
+  detail?: string;
+  ms?: number;
+}
+
+export interface InspectRequest {
+  type: "INSPECT_REQUEST";
+  target: InspectTarget;
+}
+
+export interface InspectClaims {
+  type: "INSPECT_CLAIMS";
+  claims?: ClaimCard[];
+  error?: string;
+}
+
+export interface InspectSlop {
+  type: "INSPECT_SLOP";
+  report?: SlopReport;
+  /** Why there's no report: no key, passage too short, or the call failed. */
+  note?: string;
+}
+
+export interface InspectSources {
+  type: "INSPECT_SOURCES";
+  sourcesByQuote: Record<string, VerifiedSource[]>;
+  contextsByQuote: Record<string, ContextSource[]>;
+}
+
+export interface InspectDone {
+  type: "INSPECT_DONE";
+}
+
+export type InspectMessage = InspectTrace | InspectClaims | InspectSlop | InspectSources | InspectDone;
+
+export interface InspectHandlers {
+  onTrace: (msg: InspectTrace) => void;
+  onClaims: (msg: InspectClaims) => void;
+  onSlop: (msg: InspectSlop) => void;
+  onSources: (msg: InspectSources) => void;
+  onDone: () => void;
+}
+
+/**
+ * Opens an "inspect" port for one inspection. Claim extraction and the GPTZero slop check run in
+ * parallel in the service worker, so claims, the slop report and trace steps each arrive as soon
+ * as they're ready. Returns a cancel function that drops the inspection.
+ */
+export function startInspect(target: InspectTarget, handlers: InspectHandlers): () => void {
+  const port = chrome.runtime.connect({ name: "inspect" });
+
+  port.onMessage.addListener((message: InspectMessage) => {
+    switch (message.type) {
+      case "INSPECT_TRACE":
+        handlers.onTrace(message);
+        break;
+      case "INSPECT_CLAIMS":
+        handlers.onClaims(message);
+        break;
+      case "INSPECT_SLOP":
+        handlers.onSlop(message);
+        break;
+      case "INSPECT_SOURCES":
+        handlers.onSources(message);
+        break;
+      case "INSPECT_DONE":
+        handlers.onDone();
+        port.disconnect();
+        break;
+    }
+  });
+
+  const request: InspectRequest = { type: "INSPECT_REQUEST", target };
+  port.postMessage(request);
+  return () => port.disconnect();
+}
+
+export interface OutlineRequestBlock {
+  id: string;
+  tag: string;
+  text: string;
+}
+
+export interface OutlineRequest {
+  type: "OUTLINE_REQUEST";
+  title: string;
+  blocks: OutlineRequestBlock[];
+}
+
+export interface OutlineResult {
+  type: "OUTLINE_RESULT";
+  labels?: { id: string; label: OutlineLabel }[];
+  error?: string;
+}
+
+/** Asks the service worker to label outline blocks; resolves with its single reply. */
+export function requestOutlineLabels(title: string, blocks: OutlineRequestBlock[]): Promise<OutlineResult> {
+  return new Promise((resolve) => {
+    const port = chrome.runtime.connect({ name: "outline" });
+    port.onMessage.addListener((message: OutlineResult) => {
+      resolve(message);
+      port.disconnect();
+    });
+    port.onDisconnect.addListener(() => resolve({ type: "OUTLINE_RESULT", error: "Connection closed." }));
+    const request: OutlineRequest = { type: "OUTLINE_REQUEST", title, blocks };
+    port.postMessage(request);
+  });
 }

@@ -2,7 +2,7 @@
 
 DevTools for what a page means, not how it's built. Full product vision and the long-term panel roadmap live in [`Spec.md`](./Spec.md).
 
-This repo currently holds a Chromium Manifest V3 extension with working **Accessibility**, **Console**, and **Inspector** panels. The Inspector follows the source-tracing portion of the spec: it extracts claims, validates their quoted wording against the page, and can independently search and verify primary-source excerpts through a companion Worker.
+This repo currently holds a Chromium Manifest V3 extension with working **Accessibility**, **Console**, and **Inspector** panels. The Inspector follows the source-tracing portion of the spec: it extracts claims, validates their quoted wording against the page, and can search for exact-quote matches through a companion Worker.
 
 ## What's built
 
@@ -12,7 +12,7 @@ This repo currently holds a Chromium Manifest V3 extension with working **Access
 - Check **Convert to bullet points** before Rewrite to get a bulleted list per paragraph instead of prose, applied the same way — streamed and patched in as each paragraph is ready.
 - **Restore original** reverts every rewritten paragraph in one click.
 - **Console** is a chat panel: send a message and it silently reads the current page's paragraph text as context (once per conversation), then streams the reply token-by-token. LaTeX in replies (`$inline$` or `$$block$$`) renders with KaTeX. Conversation history lives only in memory and resets when the side panel closes.
-- **Inspector** processes a selected paragraph or the page: it separates page-cited links from independently verified sources, checks candidate claim quotes against the visible page text, and shows only source excerpts that exactly contain the verified quote. It streams its search/verification progress into the panel.
+- **Inspector** processes a selected paragraph or the page: it separates page-cited links, page context, and external verification. A same-page match is context only, never evidence; external results disclose whether they have an institutional/public-record domain signal or their credibility has not been established. It streams search and verification progress into the panel.
 - Settings page (right-click the extension → Options, or the in-panel link) to pick a provider (OpenAI or OpenRouter), optionally add GPTZero for the Slop Check, and configure the source-tracing Worker endpoint. Provider keys remain local to the extension; search, browser, and index credentials remain Worker secrets.
 
 ## What's explicitly not built yet
@@ -38,7 +38,7 @@ To use Rewrite, open the extension's Options page, pick a provider, and paste an
 
 ### Source Tracer Worker
 
-The source tracer is intentionally separate from the extension so that Brave Search, Browserbase, and Elasticsearch credentials are never stored in Chrome. It uses a Durable Object per extension installation to stream trace events, searches for candidate sources, opens each candidate through Browserbase, and returns only excerpts with an exact match for the page-validated quote.
+The source tracer is intentionally separate from the extension so that Brave Search, Browserbase, and Elasticsearch credentials are never stored in Chrome. It uses a Durable Object per extension installation to stream trace events, searches for candidate sources, opens each candidate through Browserbase, and returns only excerpts with an exact match for the page-validated quote. Exact matches from the inspected page and known non-factual publishers are shown as context, not external verification.
 
 ```sh
 cd worker

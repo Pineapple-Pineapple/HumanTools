@@ -59,10 +59,10 @@ export class SourceTracerAgent extends Agent<Env, SourceTracerState> {
       .trace(payload, (event) => void write(event))
       .then(async (outcome) => {
         this.setState({ lastCompletedAt: new Date().toISOString(), lastVerifiedSourceCount: outcome.sources.length });
-        await write({ type: "SOURCE_TRACE_DONE", sources: outcome.sources });
+        await write({ type: "SOURCE_TRACE_DONE", sources: outcome.sources, contexts: outcome.contexts });
       })
       .catch(async () => {
-        await write({ type: "SOURCE_TRACE_DONE", sources: [] });
+        await write({ type: "SOURCE_TRACE_DONE", sources: [], contexts: [] });
       })
       .finally(() => writer.close());
     this.ctx.waitUntil(run);
