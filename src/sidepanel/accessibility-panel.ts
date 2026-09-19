@@ -1,4 +1,8 @@
-export interface AccessibilityPanelEls {
+import { computeFleschKincaidGrade } from "../lib/flesch-kincaid";
+import { extractPageBlocks } from "../content/functions";
+import type { PageModel } from "../lib/types";
+
+interface AccessibilityPanelEls {
   root: HTMLElement;
   analyzeBtn: HTMLButtonElement;
   gradeReadout: HTMLElement;
@@ -9,7 +13,7 @@ export interface AccessibilityPanelEls {
   optionsLink: HTMLButtonElement;
 }
 
-export function renderAccessibilityPanel(container: HTMLElement): AccessibilityPanelEls {
+function renderAccessibilityPanel(container: HTMLElement): AccessibilityPanelEls {
   const root = document.createElement("div");
   root.className = "p-4 flex flex-col gap-3 text-sm";
 
@@ -68,4 +72,43 @@ export function renderAccessibilityPanel(container: HTMLElement): AccessibilityP
   container.appendChild(root);
 
   return { root, analyzeBtn, gradeReadout, gradeSelect, rewriteBtn, restoreBtn, status, optionsLink };
+}
+
+async function getActiveTabId(): Promise<number> {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) throw new Error("No active tab.");
+  return tab.id;
+}
+
+export function mountAccessibilityPanel(container: HTMLElement): void {
+  const els = renderAccessibilityPanel(container);
+  let pageModel: PageModel | null = null;
+
+  els.analyzeBtn.addEventListener("click", async () => {
+    els.status.textContent = "Analyzing…";
+    els.analyzeBtn.disabled = true;
+    try {
+      const tabId = await getActiveTabId();
+      const [{ result }] = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: extractPageBlocks,
+      });
+      pageModel = result ?? null;
+
+      if (!pageModel || pageModel.blocks.length === 0) {
+        els.status.textContent = "No paragraph text found on this page.";
+        return;
+      }
+
+      const grade = computeFleschKincaidGrade(pageModel.blocks.map((b) => b.text).join(" "));
+      els.gradeReadout.textContent = `Reading grade: ${grade}`;
+      els.gradeSelect.disabled = false;
+      els.rewriteBtn.disabled = false;
+      els.status.textContent = `${pageModel.blocks.length} paragraphs analyzed.`;
+    } catch (err) {
+      els.status.textContent = err instanceof Error ? err.message : "Analysis failed.";
+    } finally {
+      els.analyzeBtn.disabled = false;
+    }
+  });
 }
