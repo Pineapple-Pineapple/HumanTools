@@ -7,10 +7,11 @@ import {
   markClaims,
   startPickMode,
   stopPickMode,
+  watchSelection,
 } from "../content/functions";
 import { requestOutlineLabels, startInspect } from "../lib/messages";
 import type { InspectTrace, TraceState } from "../lib/messages";
-import { getActiveTabId } from "../lib/active-tab";
+import { getActiveTabId, onActiveTabChange } from "../lib/active-tab";
 import { getSourceTracerUrl } from "../lib/provider";
 import { heuristicClaimType, splitSentences } from "../lib/claim-heuristics";
 import type { ContextSource, SourceContextReason, SourceQuality, VerifiedSource } from "../lib/source-tracer-client";
@@ -93,6 +94,7 @@ const BTN =
 const BTN_PRIMARY =
   "inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:hover:bg-amber-600 rounded text-neutral-950 font-medium";
 const CHIP = "inline-flex items-center px-1.5 py-0.5 rounded border text-[11px] leading-none";
+const NO_SELECTION_HINT = "Select a sentence or paragraph on the page first (at least a few words).";
 const SECTION_LABEL = "text-[11px] uppercase tracking-wide text-neutral-500";
 
 export function sourceContextMessage(reasons: readonly SourceContextReason[]): string {
@@ -224,6 +226,8 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   const pickLabel = el("span", "", "Pick paragraph");
   pickBtn.append(crosshairIcon(), pickLabel);
   const inspectBtn = el("button", BTN_PRIMARY, "Inspect selection");
+  inspectBtn.disabled = true;
+  inspectBtn.title = NO_SELECTION_HINT;
   const clearBtn = el("button", BTN, "Clear");
   clearBtn.hidden = true;
   toolbar.append(pickBtn, inspectBtn, clearBtn);
@@ -281,6 +285,27 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
 
   function setStatus(text: string): void {
     status.textContent = text;
+  }
+
+  /** The tab whose HT_SELECTION reports drive the Inspect selection button. */
+  let selectionTabId: number | null = null;
+
+  function setCanInspect(canInspect: boolean): void {
+    inspectBtn.disabled = !canInspect;
+    inspectBtn.title = canInspect ? "" : NO_SELECTION_HINT;
+  }
+
+  /** Starts listening to the active tab's selection; it reports straight back via HT_SELECTION. */
+  async function watchActiveSelection(): Promise<void> {
+    setCanInspect(false);
+    selectionTabId = null;
+    try {
+      const tabId = await getActiveTabId();
+      selectionTabId = tabId;
+      await chrome.scripting.executeScript({ target: { tabId }, func: watchSelection });
+    } catch {
+      // Pages the extension can't script (chrome://, the Web Store) never have an inspectable selection.
+    }
   }
 
   function setPicking(tabId: number | null): void {
@@ -720,11 +745,15 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   pickBtn.addEventListener("click", togglePick);
   inspectBtn.addEventListener("click", inspectSelection);
   clearBtn.addEventListener("click", clearMarks);
+  onActiveTabChange(() => void watchActiveSelection());
+  void watchActiveSelection();
 
   chrome.runtime.onMessage.addListener((message, sender) => {
     if (sender.id !== chrome.runtime.id || sender.tab?.id === undefined) return;
     const fromTab = sender.tab.id;
-    if (message?.type === "HT_PICKED" && fromTab === pickTabId) {
+    if (message?.type === "HT_SELECTION" && fromTab === selectionTabId) {
+      setCanInspect(message.hasSelection === true);
+    } else if (message?.type === "HT_PICKED" && fromTab === pickTabId) {
       setPicking(null);
       options.activate();
       setMode("claims");

@@ -1,7 +1,7 @@
 import { computeFleschKincaidGrade } from "../lib/flesch-kincaid";
 import { extractPageBlocks, applyRewrites, applyBullets, restoreOriginal } from "../content/functions";
 import { startRewrite } from "../lib/messages";
-import { getActiveTabId, isActiveTab } from "../lib/active-tab";
+import { getActiveTabId, isActiveTab, onActiveTabChange } from "../lib/active-tab";
 import { hasApiKey } from "../lib/provider";
 import type { Grade, PageModel, RewriteFormat } from "../lib/types";
 
@@ -131,6 +131,28 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
   let pageModel: PageModel | null = null;
   /** The tab Analyze ran on — block ids are only meaningful there. */
   let analyzedTabId: number | null = null;
+  let keyPresent = false;
+  let rewriting = false;
+  let onAnalyzedTab = false;
+
+  /** Rewrite is enabled only when a click would actually run — never to explain afterwards why not. */
+  function syncRewriteBtn(): void {
+    const analyzed = pageModel !== null && pageModel.blocks.length > 0;
+    els.rewriteBtn.disabled = !analyzed || rewriting || !keyPresent || !onAnalyzedTab;
+    els.rewriteBtn.title = !analyzed
+      ? ""
+      : !onAnalyzedTab
+        ? "This analysis belongs to another tab. Switch back to it, or analyze this page."
+        : !keyPresent
+          ? "Set an API key first."
+          : "";
+  }
+
+  // Patches are keyed by ids stamped during Analyze, so Rewrite only means anything on that tab.
+  onActiveTabChange(async () => {
+    onAnalyzedTab = analyzedTabId !== null && (await isActiveTab(analyzedTabId));
+    syncRewriteBtn();
+  });
 
   els.optionsLink.addEventListener("click", () => {
     chrome.runtime.openOptionsPage();
@@ -143,9 +165,9 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
   chrome.storage.onChanged.addListener((changes, area) => {
     const relevant = "openaiApiKey" in changes || "openrouterApiKey" in changes || "provider" in changes;
     if (area !== "local" || !relevant || !pageModel) return;
-    hasApiKey().then((keyPresent) => {
-      els.rewriteBtn.disabled = !keyPresent;
-      els.rewriteBtn.title = keyPresent ? "" : "Set an API key first.";
+    hasApiKey().then((present) => {
+      keyPresent = present;
+      syncRewriteBtn();
     });
   });
 
@@ -160,6 +182,7 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
       });
       pageModel = result ?? null;
       analyzedTabId = tabId;
+      onAnalyzedTab = true;
 
       if (!pageModel || pageModel.blocks.length === 0) {
         els.status.textContent = "No paragraph text found on this page.";
@@ -171,9 +194,7 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
       els.gradeSlider.disabled = false;
       els.bulletsCheckbox.disabled = false;
 
-      const keyPresent = await hasApiKey();
-      els.rewriteBtn.disabled = !keyPresent;
-      els.rewriteBtn.title = keyPresent ? "" : "Set an API key first.";
+      keyPresent = await hasApiKey();
       els.status.textContent = keyPresent
         ? `${pageModel.blocks.length} paragraphs analyzed.`
         : `${pageModel.blocks.length} paragraphs analyzed. Set an API key to rewrite.`;
@@ -181,6 +202,7 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
       els.status.textContent = err instanceof Error ? err.message : "Analysis failed.";
     } finally {
       els.analyzeBtn.disabled = false;
+      syncRewriteBtn();
     }
   });
 
@@ -188,16 +210,14 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
     if (!pageModel || pageModel.blocks.length === 0 || analyzedTabId === null) return;
     const grade = Number(els.gradeSlider.value) as Grade;
     const format: RewriteFormat = els.bulletsCheckbox.checked ? "bullets" : "prose";
-    // Patches are keyed by ids stamped during Analyze, so they only mean anything on that tab.
     // Rewriting whatever tab happens to be active would no-op, or worse, patch a different page.
+    // The button is disabled off that tab; this catches a click racing a tab switch.
     const tabId = analyzedTabId;
-    if (!(await isActiveTab(tabId))) {
-      els.status.textContent = "This analysis belongs to another tab. Switch back to it, or analyze this page first.";
-      return;
-    }
+    if (!(await isActiveTab(tabId))) return;
 
     els.status.textContent = `Rewriting… 0/${pageModel.blocks.length} paragraphs`;
-    els.rewriteBtn.disabled = true;
+    rewriting = true;
+    syncRewriteBtn();
     els.gradeSlider.disabled = true;
     els.bulletsCheckbox.disabled = true;
     let restoreShown = false;
@@ -231,13 +251,15 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
           msg.failed > 0
             ? `Rewrote ${msg.succeeded}/${msg.succeeded + msg.failed} paragraphs at grade ${grade} (${msg.failed} failed). Hover a paragraph to see the original.`
             : `Rewrote ${msg.succeeded} paragraphs at grade ${grade}. Hover a paragraph to see the original.`;
-        els.rewriteBtn.disabled = false;
+        rewriting = false;
+        syncRewriteBtn();
         els.gradeSlider.disabled = false;
         els.bulletsCheckbox.disabled = false;
       },
       onFatalError: (msg) => {
         els.status.textContent = msg.message;
-        els.rewriteBtn.disabled = false;
+        rewriting = false;
+        syncRewriteBtn();
         els.gradeSlider.disabled = false;
         els.bulletsCheckbox.disabled = false;
       },

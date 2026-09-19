@@ -284,6 +284,38 @@ export function captureInspectTarget(): InspectTarget | null {
 }
 
 /**
+ * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. Tells the
+ * side panel (HT_SELECTION) whether the page holds a selection long enough to inspect — now, and
+ * again whenever that changes — so Inspect selection can be disabled instead of failing on click.
+ * Installs its listener once per document; calling it again only re-reports the current state.
+ */
+export function watchSelection(): void {
+  const MIN_CHARS = 20; // keep in step with captureInspectTarget
+  const w = window as Window & { __htReportSelection?: (force: boolean) => void };
+
+  if (!w.__htReportSelection) {
+    let last: boolean | null = null;
+    w.__htReportSelection = (force) => {
+      const text = (window.getSelection()?.toString() ?? "").replace(/\s+/g, " ").trim();
+      const hasSelection = text.length >= MIN_CHARS;
+      if (!force && hasSelection === last) return;
+      last = hasSelection;
+      try {
+        chrome.runtime.sendMessage({ type: "HT_SELECTION", hasSelection }).catch(() => {});
+      } catch {
+        // The extension was reloaded; this orphaned listener has no one left to tell.
+      }
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    document.addEventListener("selectionchange", () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => w.__htReportSelection?.(false), 100);
+    });
+  }
+  w.__htReportSelection(true);
+}
+
+/**
  * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. The
  * Inspector's crosshair: hovering a block outlines it and underlines its claim-bearing sentences
  * (via the CSS Highlight API, so the page's DOM is never rewritten); clicking selects the block's
