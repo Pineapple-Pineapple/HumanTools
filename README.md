@@ -2,7 +2,7 @@
 
 DevTools for what a page means, not how it's built. Full product vision and the long-term panel roadmap live in [`Spec.md`](./Spec.md).
 
-This repo currently holds the **bare MVP**: a Chromium Manifest V3 extension shell (a DevTools-styled side panel, one tab per spec panel) with two working panels — **Accessibility**, which shows a page's local reading grade and rewrites it in plain English at a chosen grade level, and **Console**, a chat interface scoped to the current page.
+This repo currently holds a Chromium Manifest V3 extension with working **Accessibility**, **Console**, and **Inspector** panels. The Inspector follows the source-tracing portion of the spec: it extracts claims, validates their quoted wording against the page, and can independently search and verify primary-source excerpts through a companion Worker.
 
 ## What's built
 
@@ -12,11 +12,12 @@ This repo currently holds the **bare MVP**: a Chromium Manifest V3 extension she
 - Check **Convert to bullet points** before Rewrite to get a bulleted list per paragraph instead of prose, applied the same way — streamed and patched in as each paragraph is ready.
 - **Restore original** reverts every rewritten paragraph in one click.
 - **Console** is a chat panel: send a message and it silently reads the current page's paragraph text as context (once per conversation), then streams the reply token-by-token. LaTeX in replies (`$inline$` or `$$block$$`) renders with KaTeX. Conversation history lives only in memory and resets when the side panel closes.
-- Settings page (right-click the extension → Options, or the in-panel link) to pick a provider (OpenAI or OpenRouter) and store your own API key for it locally — keys are never bundled or committed, and the background service worker is the only place they're read from.
+- **Inspector** processes a selected paragraph or the page: it separates page-cited links from independently verified sources, checks candidate claim quotes against the visible page text, and shows only source excerpts that exactly contain the verified quote. It streams its search/verification progress into the panel.
+- Settings page (right-click the extension → Options, or the in-panel link) to pick a provider (OpenAI or OpenRouter), optionally add GPTZero for the Slop Check, and configure the source-tracing Worker endpoint. Provider keys remain local to the extension; search, browser, and index credentials remain Worker secrets.
 
 ## What's explicitly not built yet
 
-Everything else in `Spec.md`: the other eight panels (Inspector, Network, Memory, Performance, Recorder, Security, Application — Console is now built as a thin standalone chat, not the Inspector/Performance action-wrapper the spec describes), Memory/Backboard, the Review Team, GPTZero/Elastic/Solana/Sovereign Mode, style presets, persistent caching (the rewrite cache and chat history are in-memory and clear on service worker restart / panel close), and any sponsor integrations. This is intentionally the smallest complete slice, not a stub of the whole product.
+The remaining `Spec.md` work includes Network, Memory, Performance, Recorder, Security, and Application; Memory/Backboard; the Review Team; Solana receipts; Sovereign Mode; style presets; persistent caching; and sponsor integrations. The Inspector's source tracer requires a deployed Worker and vendor credentials before it can find sources in a loaded extension.
 
 ## Setup
 
@@ -35,8 +36,26 @@ Load it unpacked:
 
 To use Rewrite, open the extension's Options page, pick a provider, and paste an API key for it — [OpenAI](https://platform.openai.com/api-keys) or [OpenRouter](https://openrouter.ai/keys).
 
+### Source Tracer Worker
+
+The source tracer is intentionally separate from the extension so that Brave Search, Browserbase, and Elasticsearch credentials are never stored in Chrome. It uses a Durable Object per extension installation to stream trace events, searches for candidate sources, opens each candidate through Browserbase, and returns only excerpts with an exact match for the page-validated quote.
+
+```sh
+cd worker
+npm install
+cp .dev.vars.example .dev.vars
+npx wrangler secret put BRAVE_SEARCH_API_KEY
+npx wrangler secret put BROWSERBASE_API_KEY
+npx wrangler secret put BROWSERBASE_PROJECT_ID
+npx wrangler secret put ELASTIC_URL
+npx wrangler secret put ELASTIC_API_KEY
+npx wrangler deploy
+```
+
+Create the Elasticsearch target as a restricted `human-tools-sources` index before deploying. After deploy, paste `https://<worker-subdomain>/v1/trace` into **Source Tracer endpoint** in the extension Options page. The extension works without that endpoint, but Inspector reports that independent source tracing is not configured.
+
 ## Privacy notes
 
 - No content script runs on page load. Page access only happens after you click Analyze or Rewrite, or send your first Console message, via `chrome.scripting.executeScript` on the active tab.
-- The only network calls are the rewrite and chat requests to your chosen provider (OpenAI or OpenRouter), made from the background service worker using the key you provide — never hardcoded, never sent anywhere else.
+- Network calls are made only after the corresponding panel action: rewrite/chat requests go to your chosen provider; an optional GPTZero request performs the Slop Check; and an optional source-tracer request goes to the Worker URL you configure. The Worker alone calls Brave Search, Browserbase, and Elasticsearch using its secrets.
 - Rewrites are reversible: the original text for every changed paragraph is recoverable until you navigate away, and Restore original reverts them in the same session.
