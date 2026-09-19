@@ -20,12 +20,20 @@ const panels: Record<string, HTMLElement> = {
   Inspector: inspectorContainer,
 };
 
+const LAST_PANEL_KEY = "lastPanel";
+
 const { select } = renderTabs(app, (panel) => {
   for (const [name, el] of Object.entries(panels)) el.hidden = name !== panel;
+  chrome.storage.local.set({ [LAST_PANEL_KEY]: panel });
 });
 
 app.append(accessibilityContainer, consoleContainer, inspectorContainer);
 mountAccessibilityPanel(accessibilityContainer);
 mountConsolePanel(consoleContainer);
 mountInspectorPanel(inspectorContainer, { activate: () => select("Inspector") });
+
+// Reopen on the panel the reader left, not always Accessibility.
 select("Accessibility");
+chrome.storage.local.get(LAST_PANEL_KEY).then(({ lastPanel }) => {
+  if (typeof lastPanel === "string" && lastPanel in panels) select(lastPanel);
+});
