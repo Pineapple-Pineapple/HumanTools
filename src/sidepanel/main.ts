@@ -2,6 +2,8 @@ import { renderTabs } from "./tabs";
 import { mountAccessibilityPanel } from "./accessibility-panel";
 import { mountConsolePanel } from "./console-panel";
 import { mountInspectorPanel } from "./inspector-panel";
+import { mountSecurityPanel } from "./security-panel";
+import { mountApplicationPanel } from "./application-panel";
 
 const app = document.getElementById("app")!;
 
@@ -14,10 +16,18 @@ consoleContainer.className = "flex-1 min-h-0 overflow-hidden";
 const inspectorContainer = document.createElement("div");
 inspectorContainer.className = "flex-1 min-h-0 overflow-y-auto";
 
+const securityContainer = document.createElement("div");
+securityContainer.className = "flex-1 min-h-0 overflow-y-auto";
+
+const applicationContainer = document.createElement("div");
+applicationContainer.className = "flex-1 min-h-0 overflow-y-auto";
+
 const panels: Record<string, HTMLElement> = {
   Accessibility: accessibilityContainer,
   Console: consoleContainer,
   Inspector: inspectorContainer,
+  Security: securityContainer,
+  Application: applicationContainer,
 };
 
 const LAST_PANEL_KEY = "lastPanel";
@@ -27,10 +37,12 @@ const { select } = renderTabs(app, (panel) => {
   chrome.storage.local.set({ [LAST_PANEL_KEY]: panel });
 });
 
-app.append(accessibilityContainer, consoleContainer, inspectorContainer);
+app.append(accessibilityContainer, consoleContainer, inspectorContainer, securityContainer, applicationContainer);
 mountAccessibilityPanel(accessibilityContainer);
 mountConsolePanel(consoleContainer);
 mountInspectorPanel(inspectorContainer, { activate: () => select("Inspector") });
+mountSecurityPanel(securityContainer);
+mountApplicationPanel(applicationContainer);
 
 // Reopen on the panel the reader left, not always Accessibility.
 select("Accessibility");
