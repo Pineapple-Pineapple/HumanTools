@@ -1,6 +1,7 @@
 import { computeFleschKincaidGrade } from "../lib/flesch-kincaid";
 import { extractPageBlocks } from "../content/functions";
-import type { PageModel } from "../lib/types";
+import { sendRewriteRequest } from "../lib/messages";
+import type { Grade, PageModel } from "../lib/types";
 
 interface AccessibilityPanelEls {
   root: HTMLElement;
@@ -109,6 +110,26 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
       els.status.textContent = err instanceof Error ? err.message : "Analysis failed.";
     } finally {
       els.analyzeBtn.disabled = false;
+    }
+  });
+
+  els.rewriteBtn.addEventListener("click", async () => {
+    if (!pageModel || pageModel.blocks.length === 0) return;
+    const grade = Number(els.gradeSelect.value) as Grade;
+
+    els.status.textContent = "Rewriting…";
+    els.rewriteBtn.disabled = true;
+    try {
+      const response = await sendRewriteRequest(pageModel.blocks, grade);
+      if (response.type === "REWRITE_ERROR") {
+        els.status.textContent = response.message;
+        return;
+      }
+      els.status.textContent = `Rewrote ${response.patches.length} paragraphs at grade ${grade}.`;
+    } catch (err) {
+      els.status.textContent = err instanceof Error ? err.message : "Rewrite failed.";
+    } finally {
+      els.rewriteBtn.disabled = false;
     }
   });
 }
