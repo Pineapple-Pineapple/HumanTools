@@ -11,10 +11,12 @@ The Source Tracer classifies a fetched exact-quote match after Browserbase resol
 | Classification | Rule | Evidence meaning |
 | --- | --- | --- |
 | `external_verified` | Its canonical resolved URL differs from the inspected page and its domain is not on the non-factual list. | Eligible external evidence. |
-| `page_context` | Its canonical resolved URL is the inspected page. | Confirms only that the inspected page contains the text. |
-| `non_factual_context` | Its domain is in the known non-factual publisher list. | Context only; never evidence for a factual claim. |
+| `page_context` | Its canonical resolved URL is the inspected page. | Adds a context reason: the page only confirms that it contains its own text. |
+| `non_factual_context` | Its domain is in the known non-factual publisher list. | Adds a context reason: the publisher is non-factual. |
 
 Canonical comparison removes fragments and tracking parameters before comparing URLs. The comparison happens after fetch so redirects back to the inspected page cannot evade it.
+
+Context reasons are additive. A same-page result from a known non-factual publisher carries both reasons, so the Inspector can explain the circularity and the publisher warning together.
 
 ## Eligibility and Storage
 
