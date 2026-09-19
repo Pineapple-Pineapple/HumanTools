@@ -2,5 +2,9 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "human-tools-source-tracer",
   "main": "src/index.ts",
-  "compatibility_date": "2026-09-19"
+  "compatibility_date": "2026-08-22",
+  "durable_objects": {
+    "bindings": [{ "name": "SOURCE_TRACER", "class_name": "SourceTracerAgent" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SourceTracerAgent"] }]
 }
