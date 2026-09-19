@@ -220,7 +220,9 @@ export function mountNetworkPanel(container: HTMLElement): void {
     }
 
     footer.replaceChildren(el("div", SECTION_LABEL, "What we could not check"));
-    const lines = [...graph.notChecked];
+    // The collector records what it skipped or capped; dropping that on the floor would let the
+    // panel present a slice of the page as though it were the whole of it.
+    const lines = [...view.signals.truncated, ...graph.notChecked];
     if (dropped > 0) {
       lines.push(
         `${dropped} amount${dropped === 1 ? "" : "s"} the model proposed could not be found in the page's own ` +
