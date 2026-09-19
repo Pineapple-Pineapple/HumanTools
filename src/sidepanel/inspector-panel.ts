@@ -11,6 +11,7 @@ import {
 import { requestOutlineLabels, startInspect } from "../lib/messages";
 import type { InspectTrace, TraceState } from "../lib/messages";
 import { getActiveTabId } from "../lib/active-tab";
+import { getSourceTracerUrl } from "../lib/provider";
 import { heuristicClaimType, splitSentences } from "../lib/claim-heuristics";
 import type { ContextSource, SourceContextReason, SourceQuality, VerifiedSource } from "../lib/source-tracer-client";
 import type {
@@ -104,6 +105,14 @@ export function sourceContextMessage(reasons: readonly SourceContextReason[]): s
 
 export function sourceQualityMessage(quality: SourceQuality): string {
   return quality === "institutional_signal" ? "Institutional/public-record signal" : "Credibility not established";
+}
+
+/**
+ * The line shown under "External verification" when no sources are listed. A tracer that never ran
+ * must never read as a tracer that ran and found nothing — that would be a finding about the claim.
+ */
+export function noExternalSourcesMessage(notChecked?: string): string {
+  return notChecked ? `Not checked — ${notChecked}` : "No external verification found.";
 }
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = "", text?: string): HTMLElementTagNameMap[K] {
@@ -233,6 +242,8 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   let cancelInspect: (() => void) | null = null;
   let inspectedTabId: number | null = null;
   let inspectedTarget: InspectTarget | null = null;
+  /** Whether a Source Tracer endpoint is set, so cards don't claim to be checking when nothing will. */
+  let tracerConfigured = false;
   let pickTabId: number | null = null;
   const cards = new Map<number, HTMLElement>();
   const sourceSections = new Map<string, { context: HTMLElement; external: HTMLElement }>();
@@ -390,7 +401,10 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     const sourceContext = el("div", "flex flex-col gap-1");
     sourceContext.hidden = true;
     const external = el("div", "flex flex-col gap-1");
-    external.append(el("div", SECTION_LABEL, "External verification"), el("div", "text-xs text-neutral-400", "Checking external sources…"));
+    external.append(
+      el("div", SECTION_LABEL, "External verification"),
+      el("div", "text-xs text-neutral-400", tracerConfigured ? "Checking external sources…" : "Not checked yet."),
+    );
     sourceSections.set(claim.verifiedQuote, { context: sourceContext, external });
     card.append(sourceContext, external);
 
@@ -413,7 +427,12 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     return card;
   }
 
-  function renderVerifiedSources(quote: string, sources: VerifiedSource[], contexts: ContextSource[]): void {
+  function renderVerifiedSources(
+    quote: string,
+    sources: VerifiedSource[],
+    contexts: ContextSource[],
+    notChecked?: string,
+  ): void {
     const sections = sourceSections.get(quote);
     if (!sections) return;
     sections.context.hidden = contexts.length === 0;
@@ -435,7 +454,12 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     const section = sections.external;
     section.replaceChildren(el("div", SECTION_LABEL, "External verification"));
     if (!sources.length) {
-      section.appendChild(el("div", "text-xs text-neutral-400", "No external verification found."));
+      section.appendChild(el("div", "text-xs text-neutral-400", noExternalSourcesMessage(notChecked)));
+      if (notChecked) {
+        section.appendChild(
+          el("div", "text-[10px] text-neutral-500", "This is not a finding about the claim; no external check ran."),
+        );
+      }
       return;
     }
     for (const source of sources) {
@@ -538,6 +562,8 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
 
     inspectedTabId = tabId;
     inspectedTarget = target;
+    tracerConfigured = (await getSourceTracerUrl()) !== null;
+    if (myRun !== runId) return;
     addTrace(
       "Capture (page)",
       "done",
@@ -572,7 +598,14 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
       onSources: (m) => {
         if (myRun !== runId) return;
         const quotes = new Set([...Object.keys(m.sourcesByQuote), ...Object.keys(m.contextsByQuote)]);
-        for (const quote of quotes) renderVerifiedSources(quote, m.sourcesByQuote[quote] ?? [], m.contextsByQuote[quote] ?? []);
+        for (const quote of quotes) {
+          renderVerifiedSources(
+            quote,
+            m.sourcesByQuote[quote] ?? [],
+            m.contextsByQuote[quote] ?? [],
+            m.notCheckedByQuote[quote],
+          );
+        }
       },
       onDone: () => {
         if (myRun !== runId) return;

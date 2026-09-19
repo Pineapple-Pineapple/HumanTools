@@ -32,4 +32,18 @@ describe("Inspector source context copy", () => {
     expect(label).toBeTypeOf("function");
     expect(label?.("credibility_unassessed")).toBe("Credibility not established");
   });
+
+  it("never reports a tracer that did not run as a tracer that found nothing", async () => {
+    const module = await loadInspector();
+    expect(module).not.toBeNull();
+    const message = (module as unknown as {
+      noExternalSourcesMessage?: (notChecked?: string) => string;
+    } | null)?.noExternalSourcesMessage;
+
+    expect(message).toBeTypeOf("function");
+    expect(message?.("No Source Tracer endpoint set in Settings.")).toBe(
+      "Not checked — No Source Tracer endpoint set in Settings.",
+    );
+    expect(message?.()).toBe("No external verification found.");
+  });
 });

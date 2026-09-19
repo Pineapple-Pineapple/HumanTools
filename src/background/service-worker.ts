@@ -21,12 +21,15 @@ import { parseOutlineLabels, parseSlopResponse, validateClaims } from "../lib/in
 import type { ClaimValidation } from "../lib/inspect-validate";
 import { requestSourceTrace } from "../lib/source-tracer-client";
 import type { ContextSource, VerifiedSource } from "../lib/source-tracer-client";
+import { getSourceTracerUrl } from "../lib/provider";
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 });
 
 const MAX_CONCURRENT = 4;
+
+const NO_TRACER_ENDPOINT = "No Source Tracer endpoint set in Settings.";
 
 const PROVIDERS: Record<Provider, { url: string; model: string; keyName: `${Provider}ApiKey` }> = {
   openai: { url: "https://api.openai.com/v1/chat/completions", model: "gpt-4o-mini", keyName: "openaiApiKey" },
@@ -433,16 +436,18 @@ async function handleInspectRequest(
   }
 
   async function runSourceTracer(claims: ClaimCard[]): Promise<void> {
-    const { sourceTracerUrl } = await chrome.storage.local.get("sourceTracerUrl");
+    const sourceTracerUrl = await getSourceTracerUrl();
     const sourcesByQuote: Record<string, VerifiedSource[]> = {};
     const contextsByQuote: Record<string, ContextSource[]> = {};
-    if (typeof sourceTracerUrl !== "string" || !sourceTracerUrl.startsWith("https://")) {
-      trace("Source Tracer", "skipped", "No Source Tracer endpoint set in Settings.");
+    const notCheckedByQuote: Record<string, string> = {};
+    if (!sourceTracerUrl) {
+      trace("Source Tracer", "skipped", NO_TRACER_ENDPOINT);
       for (const claim of claims) {
         sourcesByQuote[claim.verifiedQuote] = [];
         contextsByQuote[claim.verifiedQuote] = [];
+        notCheckedByQuote[claim.verifiedQuote] = NO_TRACER_ENDPOINT;
       }
-      post({ type: "INSPECT_SOURCES", sourcesByQuote, contextsByQuote });
+      post({ type: "INSPECT_SOURCES", sourcesByQuote, contextsByQuote, notCheckedByQuote });
       return;
     }
 
@@ -469,12 +474,14 @@ async function handleInspectRequest(
         sourcesByQuote[claim.verifiedQuote] = result.sources;
         contextsByQuote[claim.verifiedQuote] = result.contexts;
       } catch (error) {
+        const message = error instanceof Error ? error.message : "Source tracing failed.";
         sourcesByQuote[claim.verifiedQuote] = [];
         contextsByQuote[claim.verifiedQuote] = [];
-        trace("Source Tracer", "failed", error instanceof Error ? error.message : "Source tracing failed.");
+        notCheckedByQuote[claim.verifiedQuote] = message;
+        trace("Source Tracer", "failed", message);
       }
     });
-    post({ type: "INSPECT_SOURCES", sourcesByQuote, contextsByQuote });
+    post({ type: "INSPECT_SOURCES", sourcesByQuote, contextsByQuote, notCheckedByQuote });
   }
 
   async function runSlop(): Promise<void> {
