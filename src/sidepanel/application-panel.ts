@@ -2,6 +2,8 @@ import { collectApplicationSignals } from "../content/application-signals";
 import { getActiveTabId } from "../lib/active-tab";
 import { buildApplicationReport } from "../lib/application-heuristics";
 import type { ApplicationReport, ApplicationSection, Finding, RawApplicationSignals } from "../lib/application-heuristics";
+import { createTabStore, getCurrentTabId, onTabActivated, onTabNavigated } from "../lib/tab-state";
+import { whenVisible } from "../lib/panel-visibility";
 
 const CHIP = "inline-flex items-center px-1.5 py-0.5 rounded border text-[11px] leading-none";
 const SECTION_LABEL = "text-[11px] uppercase tracking-wide text-neutral-500";
@@ -94,6 +96,13 @@ function looksLikeSignals(value: unknown): value is RawApplicationSignals {
   );
 }
 
+/** One tab's finished scan, kept so returning to that tab is a re-render rather than a re-read. */
+interface ApplicationView {
+  report: ApplicationReport;
+  signals: RawApplicationSignals;
+  status: string;
+}
+
 export function mountApplicationPanel(container: HTMLElement): void {
   const root = el("div", "p-4 flex flex-col gap-4 text-sm");
   container.appendChild(root);
@@ -130,7 +139,18 @@ export function mountApplicationPanel(container: HTMLElement): void {
   footer.hidden = true;
   root.appendChild(footer);
 
-  function render(report: ApplicationReport, signals: RawApplicationSignals): void {
+  const views = createTabStore<ApplicationView>();
+  /** Discards a scan whose answer arrived after the reader moved on, the way the inspector does. */
+  let runId = 0;
+
+  /** Takes the previous tab's findings off the screen so nothing stale is left under a new host. */
+  function clearOutput(): void {
+    scanned.hidden = true;
+    sectionsWrap.replaceChildren();
+    footer.hidden = true;
+  }
+
+  function render({ report, signals }: ApplicationView): void {
     scanned.replaceChildren(
       el("div", SECTION_LABEL, "Scanned"),
       el("div", "text-xs text-neutral-100 font-mono break-all", report.host),
@@ -160,32 +180,69 @@ export function mountApplicationPanel(container: HTMLElement): void {
     footer.hidden = false;
   }
 
-  scanBtn.addEventListener("click", async () => {
+  /** Still the tab the reader is looking at? Null means the panel has not resolved one yet. */
+  function stillCurrent(tabId: number, myRun: number): boolean {
+    const current = getCurrentTabId();
+    return myRun === runId && (current === null || current === tabId);
+  }
+
+  async function scan(tabId: number): Promise<void> {
+    const myRun = ++runId;
     scanBtn.disabled = true;
+    clearOutput();
     status.textContent = "Reading the page…";
     try {
-      const tabId = await getActiveTabId();
       const [injection] = await chrome.scripting.executeScript({ target: { tabId }, func: collectApplicationSignals });
+      if (!stillCurrent(tabId, myRun)) return;
       const result = injection?.result;
       if (!looksLikeSignals(result)) {
         // A collector that threw inside the page comes back as undefined; saying "nothing found"
         // here would be the panel inventing an all-clear it never earned.
         status.textContent = "The page did not return readable signals, so nothing was checked.";
-        scanned.hidden = true;
-        sectionsWrap.replaceChildren();
-        footer.hidden = true;
         return;
       }
 
       const report = buildApplicationReport(result);
-      render(report, result);
-      status.textContent = report.findingCount
-        ? `${report.findingCount} thing${report.findingCount === 1 ? "" : "s"} worth knowing about this page.`
-        : "Nothing matched on this page — read the limits below before taking that as an all-clear.";
+      const view: ApplicationView = {
+        report,
+        signals: result,
+        status: report.findingCount
+          ? `${report.findingCount} thing${report.findingCount === 1 ? "" : "s"} worth knowing about this page.`
+          : "Nothing matched on this page — read the limits below before taking that as an all-clear.",
+      };
+      views.set(tabId, view);
+      render(view);
+      status.textContent = view.status;
     } catch (err) {
+      if (!stillCurrent(tabId, myRun)) return;
       status.textContent = pageAccessError(err);
     } finally {
-      scanBtn.disabled = false;
+      if (myRun === runId) scanBtn.disabled = false;
     }
+  }
+
+  async function scanCurrentTab(): Promise<void> {
+    await scan(getCurrentTabId() ?? (await getActiveTabId()));
+  }
+
+  scanBtn.addEventListener("click", () => void scanCurrentTab());
+
+  // The panel outlives the tab it was opened over. Switching tabs swaps in what this tab already
+  // showed, or scans it — the scan is local and sends nothing, so it costs the reader nothing.
+  onTabActivated((tabId) => {
+    const view = views.get(tabId);
+    if (!view) {
+      // A panel nobody is looking at doesn't reach into the page; it catches up when shown.
+      whenVisible(container, () => void scan(tabId));
+      return;
+    }
+    runId++; // anything still in flight belongs to the tab the reader just left
+    scanBtn.disabled = false;
+    render(view);
+    status.textContent = view.status;
   });
+
+  // Navigating drops this tab's entry in the store, so there is nothing to restore — read the page
+  // the reader is now on.
+  onTabNavigated((tabId) => whenVisible(container, () => void scan(tabId)));
 }

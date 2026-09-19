@@ -25,6 +25,8 @@ import {
 import type { FlaggedLink, LinkResolution } from "../lib/link-resolver";
 import { emptyFindingsMessage, findingsSummary, readSecuritySignals } from "../lib/security-heuristics";
 import type { Finding, SecurityReading, SecuritySignals, SensitiveAsk, Severity } from "../lib/security-heuristics";
+import { createTabStore, getCurrentTabId, onTabActivated, onTabNavigated } from "../lib/tab-state";
+import { whenVisible } from "../lib/panel-visibility";
 
 const SEVERITY_LABEL: Record<Severity, string> = {
   high: "Worth stopping for",
@@ -295,6 +297,34 @@ function renderLinkResolver(signals: SecuritySignals, frames: readonly SecurityS
   return block;
 }
 
+/**
+ * The network block, built once per scan. Nothing here fires on its own: every request is behind a
+ * button, so a scan that runs because the reader switched tabs contacts nobody.
+ */
+function buildNetworkChecks(reading: SecurityReading, signals: SecuritySignals, frames: readonly SecuritySignals[]): Node[] {
+  return [
+    el("div", SECTION_LABEL, "Checks that reach the network — only when you press them"),
+    el(
+      "p",
+      NOTE,
+      "Everything above this line was worked out on your machine from the page's own markup. Nothing below has run yet. Each button below sends a request, says what it sends, and reports the answer as having come from the network rather than from the page.",
+    ),
+    renderDomainLookup(reading),
+    renderLinkResolver(signals, frames),
+  ];
+}
+
+/**
+ * One tab's finished check. The network block is kept as live DOM rather than rebuilt: a lookup the
+ * reader chose to pay for stays on screen when they leave the tab and come back, and re-showing it
+ * sends nothing, where rebuilding it would throw the answer away.
+ */
+interface SecurityView {
+  reading: SecurityReading;
+  network: Node[];
+  status: string;
+}
+
 export function mountSecurityPanel(container: HTMLElement): void {
   const root = el("div", "p-4 flex flex-col gap-4 text-sm");
   container.appendChild(root);
@@ -348,7 +378,23 @@ export function mountSecurityPanel(container: HTMLElement): void {
   footer.hidden = true;
   root.appendChild(footer);
 
-  function render(reading: SecurityReading, signals: SecuritySignals, frames: readonly SecuritySignals[]): void {
+  const views = createTabStore<SecurityView>();
+  /** Discards a check whose answer arrived after the reader moved on, the way the inspector does. */
+  let runId = 0;
+
+  /** Takes the previous tab's findings off the screen so nothing stale is left under a new host. */
+  function clearOutput(): void {
+    origin.hidden = true;
+    summary.hidden = true;
+    findingsSection.replaceChildren();
+    networkSection.replaceChildren();
+    networkSection.hidden = true;
+    asksSection.hidden = true;
+    footer.hidden = true;
+  }
+
+  function render(view: SecurityView): void {
+    const { reading } = view;
     origin.replaceChildren();
     const hostRow = el("div", "flex flex-wrap items-center gap-2");
     hostRow.append(el("span", "text-neutral-100 font-mono text-xs break-all", reading.hostname || "(no hostname)"), transportChip(reading));
@@ -372,16 +418,7 @@ export function mountSecurityPanel(container: HTMLElement): void {
     findingsSection.replaceChildren();
     for (const finding of reading.findings) findingsSection.appendChild(renderFinding(finding));
 
-    networkSection.replaceChildren(
-      el("div", SECTION_LABEL, "Checks that reach the network — only when you press them"),
-      el(
-        "p",
-        NOTE,
-        "Everything above this line was worked out on your machine from the page's own markup. Nothing below has run yet. Each button below sends a request, says what it sends, and reports the answer as having come from the network rather than from the page.",
-      ),
-      renderDomainLookup(reading),
-      renderLinkResolver(signals, frames),
-    );
+    networkSection.replaceChildren(...view.network);
     networkSection.hidden = false;
 
     asksSection.replaceChildren();
@@ -399,11 +436,18 @@ export function mountSecurityPanel(container: HTMLElement): void {
     footer.hidden = false;
   }
 
-  checkBtn.addEventListener("click", async () => {
+  /** Still the tab the reader is looking at? Null means the panel has not resolved one yet. */
+  function stillCurrent(tabId: number, myRun: number): boolean {
+    const current = getCurrentTabId();
+    return myRun === runId && (current === null || current === tabId);
+  }
+
+  async function check(tabId: number): Promise<void> {
+    const myRun = ++runId;
     checkBtn.disabled = true;
+    clearOutput();
     status.textContent = "Reading this page…";
     try {
-      const tabId = await getActiveTabId();
       // allFrames: true runs the collector in every frame the extension can reach, including
       // cross-origin ones — the host permissions already cover them. Each frame answers separately
       // and stays separate: the top document is frame 0, everything else is attributed to its own
@@ -412,6 +456,7 @@ export function mountSecurityPanel(container: HTMLElement): void {
         target: { tabId, allFrames: true },
         func: collectSecuritySignals,
       });
+      if (!stillCurrent(tabId, myRun)) return;
       const collected = injected.filter((entry): entry is typeof entry & { result: SecuritySignals } => Boolean(entry.result));
       const top = collected.find((entry) => entry.frameId === 0) ?? collected[0];
       if (!top) {
@@ -419,15 +464,49 @@ export function mountSecurityPanel(container: HTMLElement): void {
         return;
       }
       const subframes = collected.filter((entry) => entry !== top).map((entry) => entry.result);
-      render(readSecuritySignals(top.result, subframes), top.result, subframes);
       const frameNote = subframes.length
         ? ` Read the top page and ${subframes.length} frame${subframes.length === 1 ? "" : "s"} inside it.`
         : "";
-      status.textContent = `Read at ${new Date().toLocaleTimeString()}.${frameNote} This is a snapshot; the page can change after it.`;
+      const reading = readSecuritySignals(top.result, subframes);
+      const view: SecurityView = {
+        reading,
+        network: buildNetworkChecks(reading, top.result, subframes),
+        status: `Read at ${new Date().toLocaleTimeString()}.${frameNote} This is a snapshot; the page can change after it.`,
+      };
+      views.set(tabId, view);
+      render(view);
+      status.textContent = view.status;
     } catch (err) {
+      if (!stillCurrent(tabId, myRun)) return;
       status.textContent = pageAccessError(err);
     } finally {
-      checkBtn.disabled = false;
+      if (myRun === runId) checkBtn.disabled = false;
     }
+  }
+
+  async function checkCurrentTab(): Promise<void> {
+    await check(getCurrentTabId() ?? (await getActiveTabId()));
+  }
+
+  checkBtn.addEventListener("click", () => void checkCurrentTab());
+
+  // The panel outlives the tab it was opened over. Switching tabs swaps in what this tab already
+  // showed, or checks it — the check is local and sends nothing, so it costs the reader nothing.
+  onTabActivated((tabId) => {
+    const view = views.get(tabId);
+    if (!view) {
+      // Reading a page means injecting into every frame of it, so a panel nobody is looking at
+      // waits its turn rather than doing that on every switch for the life of the side panel.
+      whenVisible(container, () => void check(tabId));
+      return;
+    }
+    runId++; // anything still in flight belongs to the tab the reader just left
+    checkBtn.disabled = false;
+    render(view);
+    status.textContent = view.status;
   });
+
+  // Navigating drops this tab's entry in the store, so there is nothing to restore — read the page
+  // the reader is now on. A fresh read never presses the two network buttons; it only rebuilds them.
+  onTabNavigated((tabId) => whenVisible(container, () => void check(tabId)));
 }

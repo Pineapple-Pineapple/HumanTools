@@ -4,6 +4,7 @@ import { mountConsolePanel } from "./console-panel";
 import { mountInspectorPanel } from "./inspector-panel";
 import { mountSecurityPanel } from "./security-panel";
 import { mountApplicationPanel } from "./application-panel";
+import { PANEL_SHOWN_EVENT } from "../lib/panel-visibility";
 
 const app = document.getElementById("app")!;
 
@@ -33,7 +34,13 @@ const panels: Record<string, HTMLElement> = {
 const LAST_PANEL_KEY = "lastPanel";
 
 const { select } = renderTabs(app, (panel) => {
-  for (const [name, el] of Object.entries(panels)) el.hidden = name !== panel;
+  for (const [name, el] of Object.entries(panels)) {
+    const showing = name === panel;
+    const wasHidden = el.hidden;
+    el.hidden = !showing;
+    // Panels defer their automatic work while hidden; this is how they learn to catch up.
+    if (showing && wasHidden) el.dispatchEvent(new CustomEvent(PANEL_SHOWN_EVENT));
+  }
   chrome.storage.local.set({ [LAST_PANEL_KEY]: panel });
 });
 

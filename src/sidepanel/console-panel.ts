@@ -2,15 +2,21 @@ import katex from "katex";
 import { extractPageBlocks, scrollToAndHighlight } from "../content/functions";
 import { openChatPort } from "../lib/messages";
 import { getActiveTabId } from "../lib/active-tab";
+import { createTabStore, getCurrentTabId, onTabActivated, onTabNavigated } from "../lib/tab-state";
 import { hasApiKey } from "../lib/provider";
 import { findVerifiedCore, MIN_QUOTE_CANDIDATE_WORDS, normalizeWhitespace } from "../lib/quote-match";
-import type { ChatSession, ChatTurn } from "../lib/messages";
+import type { ChatTurn } from "../lib/messages";
 import type { PageLink } from "../lib/types";
 
-/** Scrolls to and briefly flashes `quote` on the active tab's page, if it can still be found. */
-async function jumpToQuote(quote: string): Promise<void> {
+/**
+ * Scrolls to and briefly flashes `quote` on `tabId`'s page. The quote was verified against the
+ * body of the page this thread was built from, and a thread is only ever on screen while its own
+ * tab is in front of the reader — so the page checked and the page scrolled are the same one.
+ * If that ever stops holding, this does nothing rather than scrolling the wrong page.
+ */
+async function jumpToQuote(tabId: number, quote: string): Promise<void> {
+  if (getCurrentTabId() !== tabId) return;
   try {
-    const tabId = await getActiveTabId();
     await chrome.scripting.executeScript({ target: { tabId }, func: scrollToAndHighlight, args: [quote] });
   } catch {
     // Tab closed, navigated away, or otherwise inaccessible — nothing useful to do.
@@ -20,6 +26,30 @@ async function jumpToQuote(quote: string): Promise<void> {
 /** Keeps the page-context system prompt within a sane token budget. */
 const MAX_CONTEXT_CHARS = 6000;
 const MAX_LINKS = 40;
+
+const NO_PAGE_LABEL = "No page read yet.";
+
+/**
+ * One tab's conversation. The transcript is kept as live DOM rather than re-rendered from
+ * `history`, so switching away and back restores it whole — bubbles, notices, citation handlers
+ * and scroll position — instead of a lossy reconstruction.
+ */
+interface Thread {
+  tabId: number;
+  transcript: HTMLElement;
+  history: ChatTurn[];
+  /** URL of the page whose text is in `history[0]`; null until a page has been read. */
+  contextUrl: string | null;
+  /** The page body quotes are verified against. Always the page this thread was built from. */
+  pageBody: string;
+  label: string;
+  labelTitle: string;
+  status: string;
+  draft: string;
+  /** Scroll offset to restore; null means "pin to the newest message". */
+  scrollTop: number | null;
+  busy: boolean;
+}
 
 interface ConsoleEls {
   root: HTMLElement;
@@ -53,10 +83,12 @@ function renderConsolePanel(container: HTMLElement): ConsoleEls {
   // about whatever page it first read.
   const pageLabel = document.createElement("p");
   pageLabel.className = "text-xs text-neutral-500 truncate";
-  pageLabel.textContent = "No page read yet.";
+  pageLabel.textContent = NO_PAGE_LABEL;
 
+  // A scroll host, not the transcript itself: the transcript is swapped out wholesale when the
+  // reader changes tabs, and scroll position belongs to the host that survives the swap.
   const messages = document.createElement("div");
-  messages.className = "flex-1 flex flex-col gap-3 overflow-y-auto min-h-[8rem]";
+  messages.className = "flex-1 overflow-y-auto min-h-[8rem]";
 
   const inputRow = document.createElement("div");
   inputRow.className = "flex gap-2 items-end";
@@ -130,7 +162,7 @@ function appendFormattedText(container: HTMLElement, text: string): void {
  * hallucinated quote never gets a source badge. Verified citations are listed again in a
  * compact source list at the end.
  */
-function renderMessageContent(container: HTMLElement, text: string, pageText: string): void {
+function renderMessageContent(container: HTMLElement, text: string, pageText: string, tabId: number): void {
   container.replaceChildren();
   const citations: { display: string; searchText: string }[] = [];
   const pageTextNormalized = normalizeWhitespace(pageText).toLowerCase();
@@ -186,7 +218,7 @@ function renderMessageContent(container: HTMLElement, text: string, pageText: st
     citations.push({ display: trimmed, searchText: core });
     const n = citations.length;
     const title = `Source ${n} — click to jump to it on the page`;
-    const onClick = () => jumpToQuote(core);
+    const onClick = () => jumpToQuote(tabId, core);
 
     const mark = document.createElement("span");
     mark.className =
@@ -234,7 +266,7 @@ function renderMessageContent(container: HTMLElement, text: string, pageText: st
       const row = document.createElement("div");
       row.className = "flex gap-1.5 cursor-pointer hover:text-neutral-300";
       row.title = "Click to jump to it on the page";
-      row.addEventListener("click", () => jumpToQuote(citation.searchText));
+      row.addEventListener("click", () => jumpToQuote(tabId, citation.searchText));
       const num = document.createElement("span");
       num.className = "text-amber-400 font-bold shrink-0";
       num.textContent = String(i + 1);
@@ -248,24 +280,22 @@ function renderMessageContent(container: HTMLElement, text: string, pageText: st
   }
 }
 
-function addBubble(messages: HTMLElement, role: "user" | "assistant"): HTMLElement {
+function addBubble(thread: Thread, role: "user" | "assistant"): HTMLElement {
   const bubble = document.createElement("div");
   bubble.className =
     role === "user"
       ? "self-end max-w-[85%] bg-amber-600 text-neutral-950 rounded px-3 py-2 whitespace-pre-wrap break-words"
       : "self-start max-w-[85%] bg-neutral-800 text-neutral-100 rounded px-3 py-2 whitespace-pre-wrap break-words";
-  messages.appendChild(bubble);
-  messages.scrollTop = messages.scrollHeight;
+  thread.transcript.appendChild(bubble);
   return bubble;
 }
 
 /** A transcript marker for something the panel did, distinct from either side of the conversation. */
-function addNotice(messages: HTMLElement, text: string): void {
+function addNotice(thread: Thread, text: string): void {
   const notice = document.createElement("div");
   notice.className = "self-center max-w-[90%] text-[11px] text-neutral-500 italic text-center";
   notice.textContent = text;
-  messages.appendChild(notice);
-  messages.scrollTop = messages.scrollHeight;
+  thread.transcript.appendChild(notice);
 }
 
 interface PageContext {
@@ -319,111 +349,187 @@ function buildSystemPrompt(context: PageContext): string {
 
 export function mountConsolePanel(container: HTMLElement): void {
   const els = renderConsolePanel(container);
-  const history: ChatTurn[] = [];
-  /** URL of the page whose text is currently in `history[0]`; null when no page has been read. */
-  let contextUrl: string | null = null;
-  let pageBodyText = "";
-  let chat: ChatSession | null = null;
-  // Read by the chat port's handlers, which are bound once — reassigned at the start of
-  // every turn so a long-lived port always streams into the bubble for the current turn.
-  let activeBubble: HTMLElement | null = null;
-  let activeText = "";
+
+  /** One conversation per tab. Evicted by tab-state when a tab navigates or closes. */
+  const threads = createTabStore<Thread>();
+  /** Which tab's thread is on screen. */
+  let shownTabId: number | null = null;
+
+  function createThread(tabId: number): Thread {
+    const transcript = document.createElement("div");
+    transcript.className = "flex flex-col gap-3";
+    const thread: Thread = {
+      tabId,
+      transcript,
+      history: [],
+      contextUrl: null,
+      pageBody: "",
+      label: NO_PAGE_LABEL,
+      labelTitle: "",
+      status: "",
+      draft: "",
+      scrollTop: null,
+      busy: false,
+    };
+    threads.set(tabId, thread);
+    return thread;
+  }
+
+  function threadFor(tabId: number): Thread {
+    return threads.get(tabId) ?? createThread(tabId);
+  }
+
+  /** Whether this thread is the one the reader is looking at, and so the one the controls drive. */
+  function isDisplayed(thread: Thread): boolean {
+    return shownTabId === thread.tabId && threads.get(thread.tabId) === thread;
+  }
 
   async function refreshKeyState(): Promise<void> {
     const keyPresent = await hasApiKey();
-    els.sendBtn.disabled = !keyPresent;
+    const thread = shownTabId === null ? undefined : threads.get(shownTabId);
+    els.sendBtn.disabled = !keyPresent || (thread?.busy ?? false);
     els.sendBtn.title = keyPresent ? "" : "Set an API key first.";
   }
-  refreshKeyState();
 
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local") return;
-    if ("openaiApiKey" in changes || "openrouterApiKey" in changes || "provider" in changes) refreshKeyState();
-  });
+  function setStatus(thread: Thread, text: string): void {
+    thread.status = text;
+    if (isDisplayed(thread)) els.status.textContent = text;
+  }
+
+  function scrollToEnd(thread: Thread): void {
+    if (isDisplayed(thread)) els.messages.scrollTop = els.messages.scrollHeight;
+    else thread.scrollTop = null;
+  }
+
+  /** Swaps the panel over to `tabId`'s conversation, parking the outgoing one where it stands. */
+  function show(tabId: number): void {
+    const outgoing = shownTabId === null ? undefined : threads.get(shownTabId);
+    if (outgoing) {
+      outgoing.scrollTop = els.messages.scrollTop;
+      outgoing.draft = els.input.value;
+    }
+
+    const thread = threadFor(tabId);
+    shownTabId = tabId;
+    els.messages.replaceChildren(thread.transcript);
+    els.messages.scrollTop = thread.scrollTop ?? els.messages.scrollHeight;
+    els.pageLabel.textContent = thread.label;
+    els.pageLabel.title = thread.labelTitle;
+    els.input.value = thread.draft;
+    els.input.disabled = thread.busy;
+    els.status.textContent = thread.status;
+    void refreshKeyState();
+  }
+
+  /**
+   * Puts this tab's page text in `history[0]`, replacing any earlier page's. Answers must be about
+   * the page in front of the reader, and the body their quotes are checked against must be that
+   * same page — so the prompt and `pageBody` are always written together, from one extraction.
+   */
+  async function loadContext(thread: Thread): Promise<void> {
+    const tab = await chrome.tabs.get(thread.tabId);
+    if (tab.url && tab.url === thread.contextUrl) return;
+
+    setStatus(thread, "Reading page…");
+    const context = await buildPageContext(thread.tabId, tab.title ?? "this page");
+    if (!context.text) return;
+
+    const systemTurn: ChatTurn = { role: "system", content: buildSystemPrompt(context) };
+    if (thread.history[0]?.role === "system") thread.history[0] = systemTurn;
+    else thread.history.unshift(systemTurn);
+
+    const switched = thread.contextUrl !== null && thread.contextUrl !== context.url;
+    thread.contextUrl = context.url;
+    thread.pageBody = context.body;
+    thread.label = `Reading: ${context.title}`;
+    thread.labelTitle = context.url;
+    if (isDisplayed(thread)) {
+      els.pageLabel.textContent = thread.label;
+      els.pageLabel.title = thread.labelTitle;
+    }
+    // A tab normally loses its thread outright when it navigates, so this is the backstop for a
+    // page that changed under us without one — the reader still gets told the ground moved.
+    if (switched) {
+      addNotice(thread, `Now reading “${context.title}”. Earlier answers were about the previous page.`);
+      scrollToEnd(thread);
+    }
+  }
+
+  function endTurn(thread: Thread, status: string): void {
+    thread.busy = false;
+    setStatus(thread, status);
+    if (!isDisplayed(thread)) return;
+    els.input.disabled = false;
+    void refreshKeyState();
+  }
+
+  async function send(): Promise<void> {
+    // Read the question before any swap, so syncing the panel can't overwrite what was just typed.
+    const text = els.input.value.trim();
+    const tabId = getCurrentTabId() ?? shownTabId;
+    if (!text || tabId === null) return;
+    if (shownTabId !== tabId) show(tabId);
+
+    const thread = threadFor(tabId);
+    if (thread.busy) return;
+
+    els.input.value = "";
+    thread.draft = "";
+    thread.busy = true;
+    els.input.disabled = true;
+    els.sendBtn.disabled = true;
+
+    try {
+      await loadContext(thread);
+    } catch {
+      // Proceed without page context if extraction fails (e.g. a chrome:// tab).
+    }
+
+    thread.history.push({ role: "user", content: text });
+    addBubble(thread, "user").textContent = text;
+
+    const bubble = addBubble(thread, "assistant");
+    let streamed = "";
+    setStatus(thread, "Thinking…");
+    scrollToEnd(thread);
+
+    // One port per turn rather than one per panel: two tabs can each have an answer in flight
+    // without their deltas landing in the other's transcript.
+    const chat = openChatPort({
+      onDelta: (msg) => {
+        streamed += msg.delta;
+        renderMessageContent(bubble, streamed, thread.pageBody, thread.tabId);
+        scrollToEnd(thread);
+      },
+      onDone: () => {
+        chat.close();
+        thread.history.push({ role: "assistant", content: streamed });
+        endTurn(thread, "");
+        if (isDisplayed(thread)) els.input.focus();
+      },
+      onError: (msg) => {
+        chat.close();
+        endTurn(thread, msg.message);
+      },
+    });
+
+    chat.send(thread.history);
+  }
 
   els.optionsLink.addEventListener("click", () => {
     chrome.runtime.openOptionsPage();
   });
 
   els.newChatBtn.addEventListener("click", () => {
-    history.length = 0;
-    contextUrl = null;
-    pageBodyText = "";
-    els.messages.replaceChildren();
-    els.pageLabel.textContent = "No page read yet.";
-    els.status.textContent = "";
+    const tabId = shownTabId;
+    if (tabId === null) return;
+    const draft = els.input.value;
+    // Only this tab's conversation. Every other tab keeps the thread it had.
+    threads.forget(tabId);
+    show(tabId);
+    els.input.value = draft;
+    threadFor(tabId).draft = draft;
   });
-
-  /**
-   * Puts the current page's text in `history[0]`, replacing any earlier page's. Answers must be
-   * about the page the user is looking at now, not the first one this panel ever saw.
-   */
-  async function loadContextForActiveTab(): Promise<void> {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id) throw new Error("No active tab.");
-    if (tab.url && tab.url === contextUrl) return;
-
-    els.status.textContent = "Reading page…";
-    const context = await buildPageContext(tab.id, tab.title ?? "this page");
-    if (!context.text) return;
-
-    const systemTurn: ChatTurn = { role: "system", content: buildSystemPrompt(context) };
-    if (history[0]?.role === "system") history[0] = systemTurn;
-    else history.unshift(systemTurn);
-
-    const switched = contextUrl !== null && contextUrl !== context.url;
-    contextUrl = context.url;
-    pageBodyText = context.body;
-    els.pageLabel.textContent = `Reading: ${context.title}`;
-    els.pageLabel.title = context.url;
-    if (switched) addNotice(els.messages, `Now reading “${context.title}”. Earlier answers were about the previous page.`);
-  }
-
-  async function send(): Promise<void> {
-    const text = els.input.value.trim();
-    if (!text) return;
-
-    els.input.value = "";
-    els.input.disabled = true;
-    els.sendBtn.disabled = true;
-
-    try {
-      await loadContextForActiveTab();
-    } catch {
-      // Proceed without page context if extraction fails (e.g. a chrome:// tab).
-    }
-
-    history.push({ role: "user", content: text });
-    addBubble(els.messages, "user").textContent = text;
-
-    activeBubble = addBubble(els.messages, "assistant");
-    activeText = "";
-    els.status.textContent = "Thinking…";
-
-    if (!chat) {
-      chat = openChatPort({
-        onDelta: (msg) => {
-          activeText += msg.delta;
-          if (activeBubble) renderMessageContent(activeBubble, activeText, pageBodyText);
-          els.messages.scrollTop = els.messages.scrollHeight;
-        },
-        onDone: () => {
-          history.push({ role: "assistant", content: activeText });
-          els.status.textContent = "";
-          els.input.disabled = false;
-          els.sendBtn.disabled = false;
-          els.input.focus();
-        },
-        onError: (msg) => {
-          els.status.textContent = msg.message;
-          els.input.disabled = false;
-          els.sendBtn.disabled = false;
-        },
-      });
-    }
-
-    chat.send(history);
-  }
 
   els.sendBtn.addEventListener("click", send);
   els.input.addEventListener("keydown", (e) => {
@@ -432,4 +538,28 @@ export function mountConsolePanel(container: HTMLElement): void {
       send();
     }
   });
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local") return;
+    if ("openaiApiKey" in changes || "openrouterApiKey" in changes || "provider" in changes) void refreshKeyState();
+  });
+
+  onTabActivated(show);
+
+  onTabNavigated((tabId) => {
+    // tab-state has already dropped this tab's thread: those answers were about a page that is
+    // gone, and its quotes would no longer be findable. The half-typed question survives, though.
+    const draft = els.input.value;
+    show(tabId);
+    els.input.value = draft;
+    threadFor(tabId).draft = draft;
+  });
+
+  void (async () => {
+    try {
+      show(getCurrentTabId() ?? (await getActiveTabId()));
+    } catch {
+      // No tab to attach to yet; the first tab event will bring one.
+    }
+  })();
 }
