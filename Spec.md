@@ -293,7 +293,7 @@ These panels reuse the MVP pipelines, so each is mostly a new view over data the
 | Panel | Question | How it works | Main risk |
 | --- | --- | --- | --- |
 | Sources | Where did this come from? | Ships first as Inspector's Trace tab. Click a sentence to build a provenance chain (article, claim, citation, paper, dataset). Elastic aggregations detect when many pages cite one origin ("repeated by 14 sites, one original source"), and Browserbase confirms each cited passage exists. | Search coverage; must show gaps honestly |
-| Accessibility | Make this understandable | Reading-level slider, jargon explainer, bulleting, plain-English rewrite, inline concept explanations. Shares its rewrite engine (the Baseten fast tier) with Performance. | Meaning drift in rewrites; show original on hover |
+| Accessibility | Make this understandable | Reading-level slider, bulleting, plain-English rewrite. Shares its rewrite engine (the Baseten fast tier) with Performance. | Meaning drift in rewrites; show original on hover |
 | Application | What is this site doing with me? | Scan in a Browserbase sandbox for requested data fields, permission prompts, account walls, dark patterns (confirmshaming, hidden unsubscribe, pre-checked boxes), and third-party trackers observed in network traffic. | Tracker list accuracy |
 | Security | Is this safe? | Ships first as Safe Preview: the link opens in a Browserbase sandbox, and the panel reports domain age, HTTPS, redirects, forms, external scripts, and login destinations. Output is an explanation of risk with a "before entering your card" note, never a safe/unsafe stamp. Also used by Human Tools Messages. | False reassurance |
 | Navigator | Where should I go? | Builds a site map from links and headings; given a goal ("cancel my subscription") returns the shortest click path. Ships as a Console command first. | Sites that hide routes behind JS |
@@ -337,7 +337,7 @@ Workflow: Coordinator, then Extractor, then Tracer, Auditor, and Critic in paral
 
 - A desktop companion built from hello-pear-qvac-tui runs a local model through QVAC. The extension talks to it over a local connection.
 - Sensitive domains (banking, health, email) use Sovereign Mode by default instead of being denied: only local heuristics and the local model run, with no network calls.
-- Available in Sovereign Mode: Performance scores, reading-level rewrite, jargon explanations, and claim typing. Web verification is not.
+- Available in Sovereign Mode: Performance scores, reading-level rewrite, and claim typing. Web verification is not.
 - **Acceptance:** with the network disabled, a mock bank page still gets Performance scores and a plain-language explanation.
 
 ### hto CLI and CI (developer tool, Tier B)
