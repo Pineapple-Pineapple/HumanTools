@@ -53,7 +53,13 @@ export function applyRewrites(patches: { id: string; text: string }[]): void {
   for (const patch of patches) {
     const el = document.querySelector(`[data-ht-block-id="${patch.id}"]`);
     if (!(el instanceof HTMLElement)) continue;
-    if (!el.title) el.title = el.textContent ?? "";
+    // Stash in a dedicated attribute, never in `title` — a paragraph that already had a tooltip
+    // would otherwise lose its original text and get that tooltip written into its body on restore.
+    if (el.dataset.htOriginal === undefined) {
+      el.dataset.htOriginal = el.textContent ?? "";
+      el.dataset.htPrevTitle = el.title;
+    }
+    el.title = el.dataset.htOriginal;
     el.textContent = patch.text;
     el.classList.add(REWRITTEN_CLASS);
   }
@@ -74,7 +80,12 @@ export function applyBullets(patches: { id: string; bullets: string[] }[]): void
   for (const patch of patches) {
     const el = document.querySelector(`[data-ht-block-id="${patch.id}"]`);
     if (!(el instanceof HTMLElement)) continue;
-    if (!el.title) el.title = el.textContent ?? "";
+    // See applyRewrites: `title` is the hover affordance only, never the source of truth.
+    if (el.dataset.htOriginal === undefined) {
+      el.dataset.htOriginal = el.textContent ?? "";
+      el.dataset.htPrevTitle = el.title;
+    }
+    el.title = el.dataset.htOriginal;
 
     const list = document.createElement("ul");
     list.style.margin = "0";
@@ -126,18 +137,31 @@ export function scrollToAndHighlight(quote: string): boolean {
   return false;
 }
 
-/** Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. */
-export function restoreOriginal(): void {
+/**
+ * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks.
+ * Returns how many paragraphs were put back, so the panel can't claim a restore that didn't happen.
+ */
+export function restoreOriginal(): number {
   const REWRITTEN_CLASS = "__ht-rewritten";
   const STYLE_ID = "__ht-style";
 
+  let restored = 0;
   document.querySelectorAll(`.${REWRITTEN_CLASS}`).forEach((el) => {
     if (!(el instanceof HTMLElement)) return;
-    el.textContent = el.title || el.textContent;
-    el.removeAttribute("title");
+    const original = el.dataset.htOriginal;
+    if (original !== undefined) el.textContent = original;
+
+    const prevTitle = el.dataset.htPrevTitle;
+    if (prevTitle) el.title = prevTitle;
+    else el.removeAttribute("title");
+
+    delete el.dataset.htOriginal;
+    delete el.dataset.htPrevTitle;
     el.classList.remove(REWRITTEN_CLASS);
+    restored += 1;
   });
   document.getElementById(STYLE_ID)?.remove();
+  return restored;
 }
 
 /**
