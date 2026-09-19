@@ -81,9 +81,24 @@ async function getActiveTabId(): Promise<number> {
   return tab.id;
 }
 
+async function hasApiKey(): Promise<boolean> {
+  const { openrouterApiKey } = await chrome.storage.local.get("openrouterApiKey");
+  return Boolean(openrouterApiKey);
+}
+
 export function mountAccessibilityPanel(container: HTMLElement): void {
   const els = renderAccessibilityPanel(container);
   let pageModel: PageModel | null = null;
+
+  els.optionsLink.addEventListener("click", () => {
+    chrome.runtime.openOptionsPage();
+  });
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local" || !("openrouterApiKey" in changes) || !pageModel) return;
+    els.rewriteBtn.disabled = !changes.openrouterApiKey.newValue;
+    els.rewriteBtn.title = changes.openrouterApiKey.newValue ? "" : "Set an OpenRouter API key first.";
+  });
 
   els.analyzeBtn.addEventListener("click", async () => {
     els.status.textContent = "Analyzing…";
@@ -104,8 +119,13 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
       const grade = computeFleschKincaidGrade(pageModel.blocks.map((b) => b.text).join(" "));
       els.gradeReadout.textContent = `Reading grade: ${grade}`;
       els.gradeSelect.disabled = false;
-      els.rewriteBtn.disabled = false;
-      els.status.textContent = `${pageModel.blocks.length} paragraphs analyzed.`;
+
+      const keyPresent = await hasApiKey();
+      els.rewriteBtn.disabled = !keyPresent;
+      els.rewriteBtn.title = keyPresent ? "" : "Set an OpenRouter API key first.";
+      els.status.textContent = keyPresent
+        ? `${pageModel.blocks.length} paragraphs analyzed.`
+        : `${pageModel.blocks.length} paragraphs analyzed. Set an OpenRouter API key to rewrite.`;
     } catch (err) {
       els.status.textContent = err instanceof Error ? err.message : "Analysis failed.";
     } finally {

@@ -20,6 +20,7 @@ export default defineManifest({
   side_panel: {
     default_path: "src/sidepanel/index.html",
   },
+  options_page: "src/options/index.html",
   permissions: ["activeTab", "scripting", "storage", "sidePanel"],
   host_permissions: ["https://openrouter.ai/*"],
 });
