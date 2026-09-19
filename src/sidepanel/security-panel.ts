@@ -1,5 +1,28 @@
 import { collectSecuritySignals } from "../content/security-signals";
 import { getActiveTabId } from "../lib/active-tab";
+import {
+  ageChip,
+  ageSentence,
+  describeRecord,
+  isRecentRegistration,
+  lookupDomain,
+  lookupTarget,
+  noRecordSentence,
+  rdapDisclosure,
+  REGISTRATION_ATTRIBUTION,
+  REGISTRATION_CAVEAT,
+  unavailableSentence,
+} from "../lib/domain-lookup";
+import type { DomainLookup } from "../lib/domain-lookup";
+import {
+  destinationSentence,
+  resolvableLinks,
+  resolveDisclosure,
+  resolveLink,
+  RESOLVE_ATTRIBUTION,
+  RESOLVE_DISCLOSURE,
+} from "../lib/link-resolver";
+import type { FlaggedLink, LinkResolution } from "../lib/link-resolver";
 import { emptyFindingsMessage, findingsSummary, readSecuritySignals } from "../lib/security-heuristics";
 import type { Finding, SecurityReading, SecuritySignals, SensitiveAsk, Severity } from "../lib/security-heuristics";
 
@@ -22,9 +45,22 @@ const SEVERITY_BAR: Record<Severity, string> = {
 };
 
 const CHIP = "inline-flex items-center px-1.5 py-0.5 rounded border text-[11px] leading-none";
+const NEUTRAL_CHIP = `${CHIP} bg-neutral-800 text-neutral-300 border-neutral-600`;
+const ATTENTION_CHIP = `${CHIP} bg-amber-950 text-amber-300 border-amber-800`;
 const SECTION_LABEL = "text-[11px] uppercase tracking-wide text-neutral-500";
 const BTN =
   "inline-flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800 border border-neutral-600 rounded text-neutral-100";
+const SMALL_BTN =
+  "self-start inline-flex items-center gap-1.5 px-2 py-1 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800 border border-neutral-600 rounded text-neutral-100 text-xs";
+const BODY = "text-xs text-neutral-300 leading-relaxed";
+const NOTE = "text-[11px] text-neutral-500 leading-snug";
+
+/**
+ * Links offered a follow button at once. Every press is a real request from the reader's address,
+ * so a page that wraps four hundred links in a shortener gets a list that ends and says so rather
+ * than four hundred buttons.
+ */
+const MAX_RESOLVABLE_SHOWN = 20;
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = "", text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -44,14 +80,14 @@ function pageAccessError(err: unknown): string {
 
 function transportChip(reading: SecurityReading): HTMLElement {
   if (reading.transport === "https") {
-    const chip = el("span", `${CHIP} bg-neutral-800 text-neutral-300 border-neutral-600`, "https — encrypted in transit");
+    const chip = el("span", NEUTRAL_CHIP, "https — encrypted in transit");
     chip.title = "Encryption in transit only. It says nothing about who runs this site or what they do with what you send.";
     return chip;
   }
   if (reading.transport === "http") {
     return el("span", `${CHIP} bg-red-950 text-red-300 border-red-800`, "http — not encrypted");
   }
-  return el("span", `${CHIP} bg-neutral-800 text-neutral-300 border-neutral-600`, reading.transport);
+  return el("span", NEUTRAL_CHIP, reading.transport);
 }
 
 function renderFinding(finding: Finding): HTMLElement {
@@ -61,7 +97,7 @@ function renderFinding(finding: Finding): HTMLElement {
   );
   card.append(el("div", "text-neutral-100 font-medium leading-snug", finding.title));
   card.append(el("span", `self-start ${CHIP} ${SEVERITY_CHIP[finding.severity]}`, SEVERITY_LABEL[finding.severity]));
-  card.append(el("p", "text-xs text-neutral-300 leading-relaxed", finding.explanation));
+  card.append(el("p", BODY, finding.explanation));
 
   if (finding.evidence.length) {
     const evidence = el("div", "flex flex-col gap-1 pt-1 border-t border-neutral-700/60");
@@ -95,11 +131,168 @@ function renderAsks(asks: readonly SensitiveAsk[]): HTMLElement {
   section.append(
     el(
       "p",
-      "text-[11px] text-neutral-500 leading-snug",
+      NOTE,
       "Read from the field names and types in the page. Nothing you have typed is read, and the destination is the address written in the markup, not wherever the data travels after that.",
     ),
   );
   return section;
+}
+
+// ---- The two checks that reach the network -----------------------------------------------------
+// Both are buttons and only buttons. Nothing below is called by the scan, and each one prints what
+// it will send, and to whom, above the control that sends it. Results are attributed to the network
+// so they are never mistaken for something read off the page.
+
+function renderDomainRecord(lookup: DomainLookup, askedAt: Date): HTMLElement {
+  const box = el("div", "flex flex-col gap-1.5 rounded bg-neutral-800/70 border border-neutral-700 p-3");
+
+  if (lookup.state === "no_record") {
+    box.append(el("p", BODY, noRecordSentence(lookup.domain)));
+    box.append(el("p", NOTE, `Asked at ${askedAt.toLocaleTimeString()}. ${REGISTRATION_ATTRIBUTION}`));
+    return box;
+  }
+  if (lookup.state === "unavailable") {
+    box.append(el("p", BODY, unavailableSentence(lookup.domain, lookup.detail)));
+    box.append(el("p", NOTE, `Asked at ${askedAt.toLocaleTimeString()}.`));
+    return box;
+  }
+  if (lookup.state === "not_a_domain") {
+    box.append(el("p", BODY, `Nothing was sent: ${lookup.detail}.`));
+    return box;
+  }
+
+  const record = lookup.record;
+  const head = el("div", "flex flex-wrap items-center gap-2");
+  head.append(
+    el("span", "text-neutral-100 font-mono text-xs break-all", record.name),
+    el("span", isRecentRegistration(record) ? ATTENTION_CHIP : NEUTRAL_CHIP, ageChip(record)),
+  );
+  box.append(head);
+  box.append(el("p", "text-sm text-neutral-100 leading-snug", ageSentence(record)));
+
+  const rows = describeRecord(record);
+  if (rows.length) {
+    const table = el("div", "flex flex-col gap-1 pt-1 border-t border-neutral-700/60");
+    for (const row of rows) {
+      const line = el("div", "text-[11px] text-neutral-400 leading-snug");
+      line.append(el("span", "text-neutral-500", `${row.label}: `), el("span", "font-mono break-all", row.value));
+      table.appendChild(line);
+    }
+    box.appendChild(table);
+  } else {
+    box.append(el("p", NOTE, "The registry answered, but its record carries no dates, no registrar and no status."));
+  }
+
+  box.append(el("p", NOTE, REGISTRATION_CAVEAT));
+  box.append(el("p", NOTE, `Asked at ${askedAt.toLocaleTimeString()}. ${REGISTRATION_ATTRIBUTION}`));
+  return box;
+}
+
+function renderDomainLookup(reading: SecurityReading): HTMLElement {
+  const block = el("div", "flex flex-col gap-2");
+  block.append(el("div", SECTION_LABEL, "How old is this domain, and who sold it?"));
+
+  const domain = lookupTarget(reading.hostname);
+  if (!domain) {
+    block.append(
+      el(
+        "p",
+        BODY,
+        `There is no registered domain name in ${reading.hostname || "this address"} to ask about — a bare IP address or a local name has no registration record. Nothing would be sent, so there is no button here.`,
+      ),
+    );
+    return block;
+  }
+
+  block.append(el("p", BODY, rdapDisclosure(domain)));
+  const button = el("button", SMALL_BTN, `Look up ${domain} at rdap.org`);
+  block.appendChild(button);
+  const result = el("div", "flex flex-col gap-1.5");
+  result.hidden = true;
+  block.appendChild(result);
+
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    result.replaceChildren(el("p", NOTE, `Asking rdap.org about ${domain}…`));
+    result.hidden = false;
+    const lookup = await lookupDomain(domain);
+    result.replaceChildren(renderDomainRecord(lookup, new Date()));
+    button.disabled = false;
+    button.textContent = `Look up ${domain} again`;
+  });
+
+  return block;
+}
+
+function renderResolution(resolution: LinkResolution, askedAt: Date): HTMLElement {
+  const box = el("div", "flex flex-col gap-1 pt-1 border-t border-neutral-700/60");
+  box.append(el("p", "text-xs text-neutral-100 leading-relaxed", destinationSentence(resolution)));
+  if (resolution.state === "resolved") {
+    box.append(el("p", NOTE, `Followed at ${askedAt.toLocaleTimeString()}. ${RESOLVE_ATTRIBUTION}`));
+  } else if (resolution.state === "failed") {
+    box.append(el("p", NOTE, `Tried at ${askedAt.toLocaleTimeString()}. The request was made; nothing usable came back.`));
+  }
+  return box;
+}
+
+function renderFlaggedLink(link: FlaggedLink): HTMLElement {
+  const card = el("div", "flex flex-col gap-1.5 rounded bg-neutral-800/70 border border-neutral-700 p-2");
+
+  const head = el("div", "flex flex-wrap items-center gap-2");
+  head.append(el("span", "text-xs text-neutral-100 leading-snug", link.text ? `“${link.text}”` : "(link with no text)"));
+  head.append(el("span", NEUTRAL_CHIP, link.reasonLabel));
+  card.appendChild(head);
+
+  const href = el("div", "text-[11px] font-mono text-neutral-400 break-all leading-snug", link.href);
+  href.title = link.href;
+  card.appendChild(href);
+  if (link.frameUrl) card.append(el("div", NOTE, `In frame ${link.frameUrl}`));
+
+  const button = el("button", SMALL_BTN, "Follow it and report where it lands");
+  button.title = resolveDisclosure(link.href);
+  card.append(el("div", NOTE, resolveDisclosure(link.href)), button);
+
+  const result = el("div", "flex flex-col gap-1");
+  result.hidden = true;
+  card.appendChild(result);
+
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    result.replaceChildren(el("p", NOTE, `Requesting ${link.href}…`));
+    result.hidden = false;
+    const resolution = await resolveLink(link.href);
+    result.replaceChildren(renderResolution(resolution, new Date()));
+    button.disabled = false;
+    button.textContent = "Follow it again";
+  });
+
+  return card;
+}
+
+function renderLinkResolver(signals: SecuritySignals, frames: readonly SecuritySignals[]): HTMLElement {
+  const block = el("div", "flex flex-col gap-2");
+  block.append(el("div", SECTION_LABEL, "Where does a link actually land?"));
+
+  const flagged = resolvableLinks(signals, frames);
+  if (flagged.length === 0) {
+    block.append(
+      el(
+        "p",
+        BODY,
+        "No link on this page is a shortener, an encoded name, or text that disagrees with where it points, so there is nothing here worth spending a request on. The addresses of the rest are already readable above.",
+      ),
+    );
+    return block;
+  }
+
+  block.append(el("p", BODY, RESOLVE_DISCLOSURE));
+  const shown = flagged.slice(0, MAX_RESOLVABLE_SHOWN);
+  for (const link of shown) block.appendChild(renderFlaggedLink(link));
+  const hidden = flagged.length - shown.length;
+  if (hidden > 0) {
+    block.append(el("p", NOTE, `${hidden} more flagged link${hidden === 1 ? "" : "s"} on this page ${hidden === 1 ? "is" : "are"} not listed here.`));
+  }
+  return block;
 }
 
 export function mountSecurityPanel(container: HTMLElement): void {
@@ -112,7 +305,14 @@ export function mountSecurityPanel(container: HTMLElement): void {
     el(
       "p",
       "text-xs text-neutral-400 leading-relaxed",
-      "Reads what the page itself shows: where it is served from, where its forms post, where its links go, and whose code runs on it. Every finding names the evidence it came from. It does not decide whether this page can be trusted — nothing here checks who runs it. Everything is computed on your machine; nothing is sent anywhere, and no value you have typed is read.",
+      "Reads what the page itself shows: where it is served from, where its forms post, where its links go, and whose code runs on it. Every finding names the evidence it came from. It does not decide whether this page can be trusted — nothing here checks who runs it. The scan is local: it runs on your machine, sends nothing anywhere, and reads no value you have typed.",
+    ),
+  );
+  header.append(
+    el(
+      "p",
+      "text-xs text-neutral-400 leading-relaxed",
+      "Two questions cannot be answered from the page — how old the domain is, and where a redirecting link ends up. Each is a button, each says what it sends and to whom before you press it, and neither fires on its own. If you never press one, nothing about this page leaves your machine.",
     ),
   );
   root.appendChild(header);
@@ -129,12 +329,16 @@ export function mountSecurityPanel(container: HTMLElement): void {
   origin.hidden = true;
   root.appendChild(origin);
 
-  const summary = el("p", "text-xs text-neutral-300 leading-relaxed");
+  const summary = el("p", BODY);
   summary.hidden = true;
   root.appendChild(summary);
 
   const findingsSection = el("div", "flex flex-col gap-2");
   root.appendChild(findingsSection);
+
+  const networkSection = el("div", "flex flex-col gap-3 pt-3 border-t border-neutral-800");
+  networkSection.hidden = true;
+  root.appendChild(networkSection);
 
   const asksSection = el("div", "flex flex-col gap-1.5 pt-3 border-t border-neutral-800");
   asksSection.hidden = true;
@@ -144,7 +348,7 @@ export function mountSecurityPanel(container: HTMLElement): void {
   footer.hidden = true;
   root.appendChild(footer);
 
-  function render(reading: SecurityReading): void {
+  function render(reading: SecurityReading, signals: SecuritySignals, frames: readonly SecuritySignals[]): void {
     origin.replaceChildren();
     const hostRow = el("div", "flex flex-wrap items-center gap-2");
     hostRow.append(el("span", "text-neutral-100 font-mono text-xs break-all", reading.hostname || "(no hostname)"), transportChip(reading));
@@ -168,6 +372,18 @@ export function mountSecurityPanel(container: HTMLElement): void {
     findingsSection.replaceChildren();
     for (const finding of reading.findings) findingsSection.appendChild(renderFinding(finding));
 
+    networkSection.replaceChildren(
+      el("div", SECTION_LABEL, "Checks that reach the network — only when you press them"),
+      el(
+        "p",
+        NOTE,
+        "Everything above this line was worked out on your machine from the page's own markup. Nothing below has run yet. Each button below sends a request, says what it sends, and reports the answer as having come from the network rather than from the page.",
+      ),
+      renderDomainLookup(reading),
+      renderLinkResolver(signals, frames),
+    );
+    networkSection.hidden = false;
+
     asksSection.replaceChildren();
     if (reading.asks.length) {
       asksSection.appendChild(renderAsks(reading.asks));
@@ -178,7 +394,7 @@ export function mountSecurityPanel(container: HTMLElement): void {
 
     footer.replaceChildren(el("div", SECTION_LABEL, "What we could not check"));
     const list = el("ul", "flex flex-col gap-1 list-disc pl-4");
-    for (const line of reading.notChecked) list.appendChild(el("li", "text-[11px] text-neutral-500 leading-snug", line));
+    for (const line of reading.notChecked) list.appendChild(el("li", NOTE, line));
     footer.appendChild(list);
     footer.hidden = false;
   }
@@ -203,7 +419,7 @@ export function mountSecurityPanel(container: HTMLElement): void {
         return;
       }
       const subframes = collected.filter((entry) => entry !== top).map((entry) => entry.result);
-      render(readSecuritySignals(top.result, subframes));
+      render(readSecuritySignals(top.result, subframes), top.result, subframes);
       const frameNote = subframes.length
         ? ` Read the top page and ${subframes.length} frame${subframes.length === 1 ? "" : "s"} inside it.`
         : "";
