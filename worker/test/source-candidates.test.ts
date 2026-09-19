@@ -29,6 +29,16 @@ describe("source candidate ranking", () => {
     expect(classify?.("https://theonion.com/story", "https://reader.test/article")).toEqual(["non_factual_context"]);
   });
 
+  it("marks an ordinary external domain as credibility unassessed", async () => {
+    const module = await loadCandidates();
+    const sourceQuality = (module as unknown as {
+      sourceQuality?: (url: string) => string;
+    } | null)?.sourceQuality;
+
+    expect(sourceQuality).toBeTypeOf("function");
+    expect(sourceQuality?.("https://example.net/report")).toBe("credibility_unassessed");
+  });
+
   it("provides the candidate ranking module", async () => {
     expect(await loadCandidates()).not.toBeNull();
   });

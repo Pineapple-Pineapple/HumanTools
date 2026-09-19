@@ -12,6 +12,7 @@ export interface CandidateSource {
 }
 
 export type SourceContextReason = "page_context" | "non_factual_context";
+export type SourceQuality = "institutional_signal" | "credibility_unassessed";
 
 const MAX_CANDIDATES = 5;
 const TRACKING_PARAMETER = /^(utm_|fbclid$|gclid$|mc_[ce]id$)/i;
@@ -56,6 +57,12 @@ function primarySourceScore(url: string): number {
   if (host === "doi.org" || host.endsWith(".doi.org")) return 220;
   if (/(?:\.edu|nature\.com|science\.org|thelancet\.com)$/i.test(host)) return 180;
   return 0;
+}
+
+/** A limited domain signal, never a general trust verdict. */
+export function sourceQuality(value: string): SourceQuality {
+  const url = canonicalizeCandidateUrl(value);
+  return url !== null && primarySourceScore(url) > 0 ? "institutional_signal" : "credibility_unassessed";
 }
 
 export function rankCandidates(results: readonly RawSearchResult[]): CandidateSource[] {

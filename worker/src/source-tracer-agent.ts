@@ -1,6 +1,6 @@
 import type { FetchedSource } from "./browserbase-fetch";
 import type { VerifiedSource } from "./elastic-index";
-import { classifySourceContext, type CandidateSource, type SourceContextReason } from "./source-candidates";
+import { classifySourceContext, sourceQuality, type CandidateSource, type SourceContextReason } from "./source-candidates";
 import { verifySourceExcerpt } from "./source-verify";
 import type { SourceTraceRequest } from "./types";
 
@@ -104,6 +104,7 @@ export function makeSourceTracer(
             excerpt: excerpt.excerpt,
             publisher: host(fetched.url),
             verifiedAt: new Date().toISOString(),
+            sourceQuality: sourceQuality(fetched.url),
             verification: "context",
             contextReasons,
           };
@@ -115,6 +116,7 @@ export function makeSourceTracer(
           excerpt: excerpt.excerpt,
           publisher: host(fetched.url),
           verifiedAt: new Date().toISOString(),
+          sourceQuality: sourceQuality(fetched.url),
           verification: "verified",
         };
       });

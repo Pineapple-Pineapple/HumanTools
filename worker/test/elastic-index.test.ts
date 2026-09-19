@@ -30,6 +30,7 @@ describe("ElasticSourceIndex", () => {
       excerpt: "Revenue increased from $1 million to $4 million.",
       publisher: "data.gov",
       verifiedAt: "2026-09-19T12:00:00.000Z",
+      sourceQuality: "institutional_signal",
     }, "revenue increased from $1 million to $4 million");
 
     expect(receiver).toBe(globalThis);
@@ -50,6 +51,7 @@ describe("ElasticSourceIndex", () => {
       excerpt: "Revenue increased from $1 million to $4 million.",
       publisher: "data.gov",
       verifiedAt: "2026-09-19T12:00:00.000Z",
+      sourceQuality: "institutional_signal",
     }, "revenue increased from $1 million to $4 million");
 
     expect(requests).toHaveLength(1);

@@ -6,6 +6,7 @@ export interface VerifiedSource {
   excerpt: string;
   publisher: string;
   verifiedAt: string;
+  sourceQuality: "institutional_signal" | "credibility_unassessed";
 }
 
 async function hash(value: string): Promise<string> {
@@ -34,6 +35,7 @@ export class ElasticSourceIndex {
         claimHash: await hash(verifiedQuote),
         sourceContentHash: await hash(source.excerpt),
         verifiedAt: source.verifiedAt,
+        sourceQuality: source.sourceQuality,
         verification: "verified",
       }),
       signal: AbortSignal.timeout(5_000),
