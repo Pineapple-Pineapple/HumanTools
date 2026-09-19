@@ -125,15 +125,13 @@ export class BrowserbaseFetcher {
   private readonly fetcher: Fetcher;
   private readonly readDocument: DocumentReader;
 
-  constructor(options: { apiKey: string; projectId: string; fetcher?: Fetcher; readDocument?: DocumentReader }) {
+  constructor(options: { apiKey: string; fetcher?: Fetcher; readDocument?: DocumentReader }) {
     this.apiKey = options.apiKey;
-    this.projectId = options.projectId;
-    this.fetcher = options.fetcher ?? fetch;
+    this.fetcher = options.fetcher ?? ((input, init) => globalThis.fetch(input, init));
     this.readDocument = options.readDocument ?? readBrowserbaseDocument;
   }
 
   private readonly apiKey: string;
-  private readonly projectId: string;
 
   async fetch(candidate: CandidateSource): Promise<FetchedSource> {
     let lastError: unknown;
@@ -160,7 +158,7 @@ export class BrowserbaseFetcher {
     const response = await this.fetcher("https://api.browserbase.com/v1/sessions", {
       method: "POST",
       headers: { Accept: "application/json", "Content-Type": "application/json", "X-BB-API-Key": this.apiKey },
-      body: JSON.stringify({ projectId: this.projectId, timeout: 60 }),
+      body: JSON.stringify({ timeout: 60 }),
       signal,
     });
     if (!response.ok) {

@@ -43,7 +43,6 @@ export class SourceTracerAgent extends Agent<Env, SourceTracerState> {
     const search = new BraveSearchClient(this.env.BRAVE_SEARCH_API_KEY);
     const browserbase = new BrowserbaseFetcher({
       apiKey: this.env.BROWSERBASE_API_KEY,
-      projectId: this.env.BROWSERBASE_PROJECT_ID,
     });
     const elastic = new ElasticSourceIndex(this.env.ELASTIC_URL, this.env.ELASTIC_API_KEY);
     const tracer = makeSourceTracer({

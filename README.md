@@ -46,7 +46,6 @@ npm install
 cp .dev.vars.example .dev.vars
 npx wrangler secret put BRAVE_SEARCH_API_KEY
 npx wrangler secret put BROWSERBASE_API_KEY
-npx wrangler secret put BROWSERBASE_PROJECT_ID
 npx wrangler secret put ELASTIC_URL
 npx wrangler secret put ELASTIC_API_KEY
 npx wrangler deploy
