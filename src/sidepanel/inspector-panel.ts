@@ -7,11 +7,12 @@ import {
   markClaims,
   startPickMode,
   stopPickMode,
+  watchSelection,
 } from "../content/functions";
 import { requestOutlineLabels, startInspect } from "../lib/messages";
 import type { InspectTrace, TraceState } from "../lib/messages";
 import { getActiveTabId } from "../lib/active-tab";
-import { createTabStore, getCurrentTabId, onTabActivated, onTabNavigated } from "../lib/tab-state";
+import { createTabStore, getCurrentTabId, onTabActivated, onTabLoaded, onTabNavigated } from "../lib/tab-state";
 import { getSourceTracerUrl } from "../lib/provider";
 import { heuristicClaimType, splitSentences } from "../lib/claim-heuristics";
 import type { ContextSource, SourceContextReason, SourceQuality, VerifiedSource } from "../lib/source-tracer-client";
@@ -94,6 +95,7 @@ const BTN =
 const BTN_PRIMARY =
   "inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:hover:bg-amber-600 rounded text-neutral-950 font-medium";
 const CHIP = "inline-flex items-center px-1.5 py-0.5 rounded border text-[11px] leading-none";
+const NO_SELECTION_HINT = "Select a sentence or paragraph on the page first (at least a few words).";
 const SECTION_LABEL = "text-[11px] uppercase tracking-wide text-neutral-500";
 
 export function sourceContextMessage(reasons: readonly SourceContextReason[]): string {
@@ -239,6 +241,8 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   const pickLabel = el("span", "", "Pick paragraph");
   pickBtn.append(crosshairIcon(), pickLabel);
   const inspectBtn = el("button", BTN_PRIMARY, "Inspect selection");
+  inspectBtn.disabled = true;
+  inspectBtn.title = NO_SELECTION_HINT;
   const clearBtn = el("button", BTN, "Clear");
   clearBtn.hidden = true;
   toolbar.append(pickBtn, inspectBtn, clearBtn);
@@ -319,6 +323,29 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   /** Whether `tabId` is both the tab whose results are on screen and the tab the reader is on. */
   function onShownTab(tabId: number): boolean {
     return shownTabId === tabId && isCurrentTab(tabId);
+  }
+
+  /** The tab whose HT_SELECTION reports drive the Inspect selection button. */
+  let selectionTabId: number | null = null;
+
+  function setCanInspect(canInspect: boolean): void {
+    inspectBtn.disabled = !canInspect;
+    inspectBtn.title = canInspect ? "" : NO_SELECTION_HINT;
+  }
+
+  /**
+   * Starts listening to a tab's selection; the watcher reports straight back via HT_SELECTION, and
+   * again whenever the selection changes. Re-run on every switch and load: an injected script does
+   * not survive a navigation, and only the tab in front of the reader drives the button.
+   */
+  async function watchSelectionOn(tabId: number): Promise<void> {
+    setCanInspect(false);
+    selectionTabId = tabId;
+    try {
+      await chrome.scripting.executeScript({ target: { tabId }, func: watchSelection });
+    } catch {
+      // Pages the extension can't script (chrome://, the Web Store) never have an inspectable selection.
+    }
   }
 
   function setPicking(tabId: number | null): void {
@@ -779,6 +806,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   async function showTab(tabId: number): Promise<void> {
     const mine = ++showRun;
     shownTabId = tabId;
+    void watchSelectionOn(tabId);
     resetResults();
     showOutline(tabId);
 
@@ -828,7 +856,9 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   chrome.runtime.onMessage.addListener((message, sender) => {
     if (sender.id !== chrome.runtime.id || sender.tab?.id === undefined) return;
     const fromTab = sender.tab.id;
-    if (message?.type === "HT_PICKED" && fromTab === pickTabId) {
+    if (message?.type === "HT_SELECTION" && fromTab === selectionTabId) {
+      setCanInspect(message.hasSelection === true);
+    } else if (message?.type === "HT_PICKED" && fromTab === pickTabId) {
       setPicking(null);
       options.activate();
       setMode("claims");
@@ -1053,6 +1083,10 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     if (pickTabId !== null && pickTabId !== tabId) void stopPicking();
     void showTab(tabId);
   });
+
+  // A fresh document has no watcher in it, and showTab's injection during the navigation itself
+  // may have landed in the page being replaced.
+  onTabLoaded((tabId) => void watchSelectionOn(tabId));
 
   onTabNavigated((tabId) => {
     // The page all of this was about is gone. Call off a run still going for it rather than

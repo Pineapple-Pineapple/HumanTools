@@ -16,6 +16,7 @@ interface Evictable {
 const stores: Evictable[] = [];
 const activatedListeners: TabListener[] = [];
 const navigatedListeners: TabListener[] = [];
+const loadedListeners: TabListener[] = [];
 
 let currentTabId: number | null = null;
 /** The window this panel belongs to. Tab events fire for every window; only ours matter. */
@@ -33,6 +34,14 @@ export function onTabActivated(listener: TabListener): void {
 /** Fires when the tab in front of the reader navigates to a different page. */
 export function onTabNavigated(listener: TabListener): void {
   navigatedListeners.push(listener);
+}
+
+/**
+ * Fires when the tab in front of the reader finishes loading a document — the point at which any
+ * script a panel injected into it is gone for good and has to be put back.
+ */
+export function onTabLoaded(listener: TabListener): void {
+  loadedListeners.push(listener);
 }
 
 export interface TabStore<T> {
@@ -75,6 +84,9 @@ chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === "complete" && tabId === currentTabId) {
+    for (const listener of loadedListeners) listener(tabId);
+  }
   // Only a real navigation invalidates a result; title and favicon changes do not.
   if (!changeInfo.url) return;
   evict(tabId);
