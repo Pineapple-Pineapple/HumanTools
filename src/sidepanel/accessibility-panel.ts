@@ -1,13 +1,17 @@
 import { computeFleschKincaidGrade } from "../lib/flesch-kincaid";
 import { extractPageBlocks, applyRewrites, restoreOriginal } from "../content/functions";
-import { sendRewriteRequest } from "../lib/messages";
+import { startRewrite } from "../lib/messages";
 import type { Grade, PageModel } from "../lib/types";
+
+const GRADE_STEPS: Grade[] = [6, 8, 10, 12];
+const DEFAULT_GRADE: Grade = 8;
 
 interface AccessibilityPanelEls {
   root: HTMLElement;
   analyzeBtn: HTMLButtonElement;
   gradeReadout: HTMLElement;
-  gradeSelect: HTMLSelectElement;
+  gradeSlider: HTMLInputElement;
+  gradeValue: HTMLElement;
   rewriteBtn: HTMLButtonElement;
   restoreBtn: HTMLButtonElement;
   status: HTMLElement;
@@ -16,11 +20,14 @@ interface AccessibilityPanelEls {
 
 function renderAccessibilityPanel(container: HTMLElement): AccessibilityPanelEls {
   const root = document.createElement("div");
-  root.className = "p-4 flex flex-col gap-3 text-sm";
+  root.className = "p-4 flex flex-col gap-4 text-sm";
 
   const heading = document.createElement("h1");
   heading.textContent = "Accessibility — make this understandable";
   heading.className = "text-neutral-100 font-medium";
+
+  const analyzeGroup = document.createElement("div");
+  analyzeGroup.className = "flex flex-col gap-2";
 
   const analyzeBtn = document.createElement("button");
   analyzeBtn.textContent = "Analyze this page";
@@ -31,21 +38,41 @@ function renderAccessibilityPanel(container: HTMLElement): AccessibilityPanelEls
   gradeReadout.className = "text-neutral-400";
   gradeReadout.textContent = "Reading grade: —";
 
-  const gradeRow = document.createElement("label");
-  gradeRow.className = "flex items-center gap-2 text-neutral-300";
+  analyzeGroup.append(analyzeBtn, gradeReadout);
+
+  const rewriteGroup = document.createElement("div");
+  rewriteGroup.className = "flex flex-col gap-3 pt-3 border-t border-neutral-800";
+
+  const gradeRow = document.createElement("div");
+  gradeRow.className = "flex flex-col gap-1";
+
+  const gradeLabelRow = document.createElement("div");
+  gradeLabelRow.className = "flex items-center justify-between text-neutral-300";
   const gradeLabel = document.createElement("span");
   gradeLabel.textContent = "Rewrite for grade";
-  const gradeSelect = document.createElement("select");
-  gradeSelect.className = "bg-neutral-800 border border-neutral-600 rounded px-1.5 py-1";
-  gradeSelect.disabled = true;
-  for (const grade of [6, 9, 12]) {
-    const opt = document.createElement("option");
-    opt.value = String(grade);
-    opt.textContent = String(grade);
-    if (grade === 9) opt.selected = true;
-    gradeSelect.appendChild(opt);
+  const gradeValue = document.createElement("span");
+  gradeValue.className = "text-neutral-100 font-medium";
+  gradeValue.textContent = String(DEFAULT_GRADE);
+  gradeLabelRow.append(gradeLabel, gradeValue);
+
+  const gradeSlider = document.createElement("input");
+  gradeSlider.type = "range";
+  gradeSlider.min = "6";
+  gradeSlider.max = "12";
+  gradeSlider.step = "2";
+  gradeSlider.value = String(DEFAULT_GRADE);
+  gradeSlider.disabled = true;
+  gradeSlider.className = "w-full accent-amber-600";
+
+  const ticksRow = document.createElement("div");
+  ticksRow.className = "flex justify-between text-xs text-neutral-500 px-0.5";
+  for (const grade of GRADE_STEPS) {
+    const tick = document.createElement("span");
+    tick.textContent = String(grade);
+    ticksRow.appendChild(tick);
   }
-  gradeRow.append(gradeLabel, gradeSelect);
+
+  gradeRow.append(gradeLabelRow, gradeSlider, ticksRow);
 
   const actionRow = document.createElement("div");
   actionRow.className = "flex gap-2";
@@ -66,13 +93,14 @@ function renderAccessibilityPanel(container: HTMLElement): AccessibilityPanelEls
   status.className = "text-xs text-neutral-500 min-h-[1em]";
 
   const optionsLink = document.createElement("button");
-  optionsLink.textContent = "Set OpenRouter API key";
+  optionsLink.textContent = "Set API key";
   optionsLink.className = "self-start text-xs text-amber-500 hover:underline";
 
-  root.append(heading, analyzeBtn, gradeReadout, gradeRow, actionRow, status, optionsLink);
+  rewriteGroup.append(gradeRow, actionRow, status, optionsLink);
+  root.append(heading, analyzeGroup, rewriteGroup);
   container.appendChild(root);
 
-  return { root, analyzeBtn, gradeReadout, gradeSelect, rewriteBtn, restoreBtn, status, optionsLink };
+  return { root, analyzeBtn, gradeReadout, gradeSlider, gradeValue, rewriteBtn, restoreBtn, status, optionsLink };
 }
 
 async function getActiveTabId(): Promise<number> {
@@ -82,8 +110,12 @@ async function getActiveTabId(): Promise<number> {
 }
 
 async function hasApiKey(): Promise<boolean> {
-  const { openrouterApiKey } = await chrome.storage.local.get("openrouterApiKey");
-  return Boolean(openrouterApiKey);
+  const { provider, openaiApiKey, openrouterApiKey } = await chrome.storage.local.get([
+    "provider",
+    "openaiApiKey",
+    "openrouterApiKey",
+  ]);
+  return Boolean(provider === "openrouter" ? openrouterApiKey : openaiApiKey);
 }
 
 export function mountAccessibilityPanel(container: HTMLElement): void {
@@ -94,10 +126,17 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
     chrome.runtime.openOptionsPage();
   });
 
+  els.gradeSlider.addEventListener("input", () => {
+    els.gradeValue.textContent = els.gradeSlider.value;
+  });
+
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local" || !("openrouterApiKey" in changes) || !pageModel) return;
-    els.rewriteBtn.disabled = !changes.openrouterApiKey.newValue;
-    els.rewriteBtn.title = changes.openrouterApiKey.newValue ? "" : "Set an OpenRouter API key first.";
+    const relevant = "openaiApiKey" in changes || "openrouterApiKey" in changes || "provider" in changes;
+    if (area !== "local" || !relevant || !pageModel) return;
+    hasApiKey().then((keyPresent) => {
+      els.rewriteBtn.disabled = !keyPresent;
+      els.rewriteBtn.title = keyPresent ? "" : "Set an API key first.";
+    });
   });
 
   els.analyzeBtn.addEventListener("click", async () => {
@@ -118,14 +157,14 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
 
       const grade = computeFleschKincaidGrade(pageModel.blocks.map((b) => b.text).join(" "));
       els.gradeReadout.textContent = `Reading grade: ${grade}`;
-      els.gradeSelect.disabled = false;
+      els.gradeSlider.disabled = false;
 
       const keyPresent = await hasApiKey();
       els.rewriteBtn.disabled = !keyPresent;
-      els.rewriteBtn.title = keyPresent ? "" : "Set an OpenRouter API key first.";
+      els.rewriteBtn.title = keyPresent ? "" : "Set an API key first.";
       els.status.textContent = keyPresent
         ? `${pageModel.blocks.length} paragraphs analyzed.`
-        : `${pageModel.blocks.length} paragraphs analyzed. Set an OpenRouter API key to rewrite.`;
+        : `${pageModel.blocks.length} paragraphs analyzed. Set an API key to rewrite.`;
     } catch (err) {
       els.status.textContent = err instanceof Error ? err.message : "Analysis failed.";
     } finally {
@@ -135,31 +174,40 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
 
   els.rewriteBtn.addEventListener("click", async () => {
     if (!pageModel || pageModel.blocks.length === 0) return;
-    const grade = Number(els.gradeSelect.value) as Grade;
+    const grade = Number(els.gradeSlider.value) as Grade;
+    const tabId = await getActiveTabId();
 
-    els.status.textContent = "Rewriting…";
+    els.status.textContent = `Rewriting… 0/${pageModel.blocks.length} paragraphs`;
     els.rewriteBtn.disabled = true;
-    try {
-      const response = await sendRewriteRequest(pageModel.blocks, grade);
-      if (response.type === "REWRITE_ERROR") {
-        els.status.textContent = response.message;
-        return;
-      }
+    els.gradeSlider.disabled = true;
+    let restoreShown = false;
 
-      const tabId = await getActiveTabId();
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        func: applyRewrites,
-        args: [response.patches],
-      });
-
-      els.status.textContent = `Rewrote ${response.patches.length} paragraphs at grade ${grade}. Hover a paragraph to see the original.`;
-      els.restoreBtn.hidden = false;
-    } catch (err) {
-      els.status.textContent = err instanceof Error ? err.message : "Rewrite failed.";
-    } finally {
-      els.rewriteBtn.disabled = false;
-    }
+    startRewrite(pageModel.blocks, grade, {
+      onProgress: (msg) => {
+        chrome.scripting.executeScript({ target: { tabId }, func: applyRewrites, args: [[msg.patch]] });
+        els.status.textContent = `Rewriting… ${msg.done}/${msg.total} paragraphs`;
+        if (!restoreShown) {
+          els.restoreBtn.hidden = false;
+          restoreShown = true;
+        }
+      },
+      onParagraphError: (msg) => {
+        els.status.textContent = `Rewriting… ${msg.done}/${msg.total} paragraphs`;
+      },
+      onDone: (msg) => {
+        els.status.textContent =
+          msg.failed > 0
+            ? `Rewrote ${msg.succeeded}/${msg.succeeded + msg.failed} paragraphs at grade ${grade} (${msg.failed} failed). Hover a paragraph to see the original.`
+            : `Rewrote ${msg.succeeded} paragraphs at grade ${grade}. Hover a paragraph to see the original.`;
+        els.rewriteBtn.disabled = false;
+        els.gradeSlider.disabled = false;
+      },
+      onFatalError: (msg) => {
+        els.status.textContent = msg.message;
+        els.rewriteBtn.disabled = false;
+        els.gradeSlider.disabled = false;
+      },
+    });
   });
 
   els.restoreBtn.addEventListener("click", async () => {

@@ -8,4 +8,6 @@ export interface PageModel {
   blocks: Block[];
 }
 
-export type Grade = 6 | 9 | 12;
+export type Grade = 6 | 8 | 10 | 12;
+
+export type Provider = "openai" | "openrouter";

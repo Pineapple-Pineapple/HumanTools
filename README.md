@@ -8,9 +8,9 @@ This repo currently holds the **bare MVP**: a Chromium Manifest V3 extension she
 
 - Click the toolbar icon to open the side panel. Nine DevTools-named tabs are shown; only **Accessibility** is enabled, the rest are visibly disabled placeholders.
 - **Analyze this page** extracts the page's paragraph text on demand (nothing runs until you click) and computes a Flesch-Kincaid reading grade locally — no network call.
-- Pick a target grade (6 / 9 / 12) and **Rewrite** sends the paragraphs to OpenRouter (`openai/gpt-4o-mini`) for a plain-English rewrite, applied directly on the page. Each rewritten paragraph keeps its original text in its `title` attribute (hover to see it) and gets a visible dashed outline marking it as AI-generated.
+- Pick a target grade (6 / 9 / 12) and **Rewrite** sends the paragraphs to OpenAI (`gpt-4o-mini`) for a plain-English rewrite, applied directly on the page. Each rewritten paragraph keeps its original text in its `title` attribute (hover to see it) and gets a visible dashed outline marking it as AI-generated.
 - **Restore original** reverts every rewritten paragraph in one click.
-- Settings page (right-click the extension → Options, or the in-panel link) to store your own OpenRouter API key locally — it's never bundled or committed, and the background service worker is the only place it's read from.
+- Settings page (right-click the extension → Options, or the in-panel link) to pick a provider (OpenAI or OpenRouter) and store your own API key for it locally — keys are never bundled or committed, and the background service worker is the only place they're read from.
 
 ## What's explicitly not built yet
 
@@ -31,10 +31,10 @@ Load it unpacked:
 2. Go to `chrome://extensions`, enable Developer mode
 3. **Load unpacked** → select the `dist/` folder
 
-To use Rewrite, open the extension's Options page and paste an [OpenRouter](https://openrouter.ai) API key.
+To use Rewrite, open the extension's Options page, pick a provider, and paste an API key for it — [OpenAI](https://platform.openai.com/api-keys) or [OpenRouter](https://openrouter.ai/keys).
 
 ## Privacy notes
 
 - No content script runs on page load. Page access only happens after you click Analyze or Rewrite, via `chrome.scripting.executeScript` on the active tab.
-- The only network call is the OpenRouter rewrite request, made from the background service worker using the key you provide — never hardcoded, never sent anywhere else.
+- The only network call is the rewrite request to your chosen provider (OpenAI or OpenRouter), made from the background service worker using the key you provide — never hardcoded, never sent anywhere else.
 - Rewrites are reversible: the original text for every changed paragraph is recoverable until you navigate away, and Restore original reverts them in the same session.
