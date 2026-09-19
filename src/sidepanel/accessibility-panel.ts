@@ -2,11 +2,22 @@ import { computeFleschKincaidGrade } from "../lib/flesch-kincaid";
 import { extractPageBlocks, applyRewrites, applyBullets, restoreOriginal } from "../content/functions";
 import { startRewrite } from "../lib/messages";
 import { getActiveTabId, isActiveTab } from "../lib/active-tab";
+import { createTabStore, getCurrentTabId, onTabActivated, onTabNavigated } from "../lib/tab-state";
+import { whenVisible } from "../lib/panel-visibility";
 import { hasApiKey } from "../lib/provider";
 import type { Grade, PageModel, RewriteFormat } from "../lib/types";
 
 const GRADE_STEPS: Grade[] = [6, 8, 10, 12];
 const DEFAULT_GRADE: Grade = 8;
+
+/** Turns scripting failures on pages extensions can't touch into something a reader understands. */
+function pageAccessError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/cannot access|cannot be scripted|extensions gallery|chrome:\/\//i.test(message)) {
+    return "This page can't be analyzed — browser pages and extension stores are off-limits to extensions.";
+  }
+  return message || "Analysis failed.";
+}
 
 interface AccessibilityPanelEls {
   root: HTMLElement;
@@ -128,9 +139,116 @@ function renderAccessibilityPanel(container: HTMLElement): AccessibilityPanelEls
 
 export function mountAccessibilityPanel(container: HTMLElement): void {
   const els = renderAccessibilityPanel(container);
-  let pageModel: PageModel | null = null;
-  /** The tab Analyze ran on — block ids are only meaningful there. */
-  let analyzedTabId: number | null = null;
+
+  /**
+   * What Analyze found on one tab. Extraction and the grade are local and free, so this can be
+   * rebuilt on demand; whether the page currently carries rewrites cannot, so it is recorded here.
+   * Entries are evicted by tab-state when their tab navigates or closes.
+   */
+  interface TabAnalysis {
+    pageModel: PageModel;
+    grade: number;
+    /** Whether this tab's page has rewrites applied — what "Restore original" hangs off. */
+    rewritten: boolean;
+    /** A rewrite is streaming into this tab; its controls stay locked until it finishes. */
+    rewriting: boolean;
+    status: string;
+  }
+
+  const analyses = createTabStore<TabAnalysis>();
+  /** Discards an analysis whose tab the reader has already left behind. */
+  let analyzeRun = 0;
+
+  /**
+   * Whether `tabId` is the tab in front of the reader. A null answer from tab-state means it hasn't
+   * resolved the starting tab yet — nothing has moved, so the tab we looked up is still the one.
+   */
+  function isCurrentTab(tabId: number): boolean {
+    const current = getCurrentTabId();
+    return current === null || current === tabId;
+  }
+
+  /** Puts `tabId`'s analysis on screen, or the empty state if it has none. */
+  function render(tabId: number | null): void {
+    const analysis = analyses.get(tabId);
+    if (!analysis) {
+      els.gradeReadout.textContent = "Reading grade: —";
+      els.gradeSlider.disabled = true;
+      els.bulletsCheckbox.disabled = true;
+      els.rewriteBtn.disabled = true;
+      els.restoreBtn.hidden = true;
+      els.status.textContent = "";
+      return;
+    }
+    els.gradeReadout.textContent = `Reading grade: ${analysis.grade}`;
+    els.gradeSlider.disabled = analysis.rewriting;
+    els.bulletsCheckbox.disabled = analysis.rewriting;
+    els.restoreBtn.hidden = !analysis.rewritten;
+    els.status.textContent = analysis.status;
+    void refreshRewriteButton(tabId);
+  }
+
+  async function refreshRewriteButton(tabId: number | null): Promise<void> {
+    const keyPresent = await hasApiKey();
+    if (tabId === null || !isCurrentTab(tabId)) return;
+    const analysis = analyses.get(tabId);
+    els.rewriteBtn.disabled = !analysis || analysis.rewriting || !keyPresent;
+    els.rewriteBtn.title = keyPresent ? "" : "Set an API key first.";
+  }
+
+  /** Records a change against a tab's analysis and re-renders only if that tab is the one on screen. */
+  function update(tabId: number, changes: Partial<TabAnalysis>): void {
+    const analysis = analyses.get(tabId);
+    // Gone means the tab navigated or closed: the analysis described a page that no longer exists.
+    if (!analysis) return;
+    Object.assign(analysis, changes);
+    if (isCurrentTab(tabId)) render(tabId);
+  }
+
+  /**
+   * Reads the page and scores it. Local and free — no network, no API key, no spend — which is why
+   * this may run on its own when the reader switches to a tab nothing is stored for.
+   */
+  async function analyze(tabId: number): Promise<void> {
+    const myRun = ++analyzeRun;
+    if (isCurrentTab(tabId)) {
+      els.status.textContent = "Analyzing…";
+      els.analyzeBtn.disabled = true;
+    }
+    try {
+      const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: extractPageBlocks });
+      if (myRun !== analyzeRun) return;
+      const pageModel = result ?? null;
+      if (!pageModel || pageModel.blocks.length === 0) {
+        if (isCurrentTab(tabId)) els.status.textContent = "No paragraph text found on this page.";
+        return;
+      }
+
+      const grade = computeFleschKincaidGrade(pageModel.blocks.map((b) => b.text).join(" "));
+      const keyPresent = await hasApiKey();
+      if (myRun !== analyzeRun) return;
+
+      // Re-analyzing re-reads the text; it does not undo anything already done to the page. A tab
+      // that is mid-rewrite, or already carries one, keeps saying so.
+      const previous = analyses.get(tabId);
+      analyses.set(tabId, {
+        pageModel,
+        grade,
+        rewritten: previous?.rewritten ?? false,
+        rewriting: previous?.rewriting ?? false,
+        status: previous?.rewriting
+          ? previous.status
+          : keyPresent
+            ? `${pageModel.blocks.length} paragraphs analyzed.`
+            : `${pageModel.blocks.length} paragraphs analyzed. Set an API key to rewrite.`,
+      });
+      if (isCurrentTab(tabId)) render(tabId);
+    } catch (err) {
+      if (myRun === analyzeRun && isCurrentTab(tabId)) els.status.textContent = pageAccessError(err);
+    } finally {
+      if (myRun === analyzeRun) els.analyzeBtn.disabled = false;
+    }
+  }
 
   els.optionsLink.addEventListener("click", () => {
     chrome.runtime.openOptionsPage();
@@ -142,68 +260,41 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
 
   chrome.storage.onChanged.addListener((changes, area) => {
     const relevant = "openaiApiKey" in changes || "openrouterApiKey" in changes || "provider" in changes;
-    if (area !== "local" || !relevant || !pageModel) return;
-    hasApiKey().then((keyPresent) => {
-      els.rewriteBtn.disabled = !keyPresent;
-      els.rewriteBtn.title = keyPresent ? "" : "Set an API key first.";
-    });
+    if (area !== "local" || !relevant) return;
+    void refreshRewriteButton(getCurrentTabId());
   });
 
   els.analyzeBtn.addEventListener("click", async () => {
-    els.status.textContent = "Analyzing…";
-    els.analyzeBtn.disabled = true;
     try {
-      const tabId = await getActiveTabId();
-      const [{ result }] = await chrome.scripting.executeScript({
-        target: { tabId },
-        func: extractPageBlocks,
-      });
-      pageModel = result ?? null;
-      analyzedTabId = tabId;
-
-      if (!pageModel || pageModel.blocks.length === 0) {
-        els.status.textContent = "No paragraph text found on this page.";
-        return;
-      }
-
-      const grade = computeFleschKincaidGrade(pageModel.blocks.map((b) => b.text).join(" "));
-      els.gradeReadout.textContent = `Reading grade: ${grade}`;
-      els.gradeSlider.disabled = false;
-      els.bulletsCheckbox.disabled = false;
-
-      const keyPresent = await hasApiKey();
-      els.rewriteBtn.disabled = !keyPresent;
-      els.rewriteBtn.title = keyPresent ? "" : "Set an API key first.";
-      els.status.textContent = keyPresent
-        ? `${pageModel.blocks.length} paragraphs analyzed.`
-        : `${pageModel.blocks.length} paragraphs analyzed. Set an API key to rewrite.`;
+      await analyze(getCurrentTabId() ?? (await getActiveTabId()));
     } catch (err) {
-      els.status.textContent = err instanceof Error ? err.message : "Analysis failed.";
-    } finally {
-      els.analyzeBtn.disabled = false;
+      els.status.textContent = pageAccessError(err);
     }
   });
 
   els.rewriteBtn.addEventListener("click", async () => {
-    if (!pageModel || pageModel.blocks.length === 0 || analyzedTabId === null) return;
+    const tabId = getCurrentTabId();
+    const analysis = analyses.get(tabId);
+    if (tabId === null || !analysis || analysis.pageModel.blocks.length === 0 || analysis.rewriting) return;
+
     const grade = Number(els.gradeSlider.value) as Grade;
     const format: RewriteFormat = els.bulletsCheckbox.checked ? "bullets" : "prose";
+
     // Patches are keyed by ids stamped during Analyze, so they only mean anything on that tab.
-    // Rewriting whatever tab happens to be active would no-op, or worse, patch a different page.
-    const tabId = analyzedTabId;
+    // Holding analyses per tab keeps these in step by construction; this still catches the tab
+    // moving out from under the click while the check itself is in flight.
     if (!(await isActiveTab(tabId))) {
       els.status.textContent = "This analysis belongs to another tab. Switch back to it, or analyze this page first.";
       return;
     }
 
-    els.status.textContent = `Rewriting… 0/${pageModel.blocks.length} paragraphs`;
-    els.rewriteBtn.disabled = true;
-    els.gradeSlider.disabled = true;
-    els.bulletsCheckbox.disabled = true;
-    let restoreShown = false;
+    const total = analysis.pageModel.blocks.length;
+    update(tabId, { rewriting: true, status: `Rewriting… 0/${total} paragraphs` });
 
-    startRewrite(pageModel.blocks, grade, format, {
+    startRewrite(analysis.pageModel.blocks, grade, format, {
       onProgress: (msg) => {
+        // Patches keep landing on the tab they were computed for even if the reader has moved on:
+        // they belong to that page, and the spend already happened.
         if (format === "bullets" && msg.patch.bullets) {
           chrome.scripting.executeScript({
             target: { tabId },
@@ -217,46 +308,56 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
             args: [[{ id: msg.patch.id, text: msg.patch.text }]],
           });
         }
-        if (!restoreShown) {
-          els.restoreBtn.hidden = false;
-          restoreShown = true;
-        }
-        els.status.textContent = `Rewriting… ${msg.done}/${msg.total} paragraphs`;
+        update(tabId, { rewritten: true, status: `Rewriting… ${msg.done}/${msg.total} paragraphs` });
       },
       onParagraphError: (msg) => {
-        els.status.textContent = `Rewriting… ${msg.done}/${msg.total} paragraphs`;
+        update(tabId, { status: `Rewriting… ${msg.done}/${msg.total} paragraphs` });
       },
       onDone: (msg) => {
-        els.status.textContent =
-          msg.failed > 0
-            ? `Rewrote ${msg.succeeded}/${msg.succeeded + msg.failed} paragraphs at grade ${grade} (${msg.failed} failed). Hover a paragraph to see the original.`
-            : `Rewrote ${msg.succeeded} paragraphs at grade ${grade}. Hover a paragraph to see the original.`;
-        els.rewriteBtn.disabled = false;
-        els.gradeSlider.disabled = false;
-        els.bulletsCheckbox.disabled = false;
+        update(tabId, {
+          rewriting: false,
+          status:
+            msg.failed > 0
+              ? `Rewrote ${msg.succeeded}/${msg.succeeded + msg.failed} paragraphs at grade ${grade} (${msg.failed} failed). Hover a paragraph to see the original.`
+              : `Rewrote ${msg.succeeded} paragraphs at grade ${grade}. Hover a paragraph to see the original.`,
+        });
       },
       onFatalError: (msg) => {
-        els.status.textContent = msg.message;
-        els.rewriteBtn.disabled = false;
-        els.gradeSlider.disabled = false;
-        els.bulletsCheckbox.disabled = false;
+        update(tabId, { rewriting: false, status: msg.message });
       },
     });
   });
 
   els.restoreBtn.addEventListener("click", async () => {
-    if (analyzedTabId === null) return;
-    try {
-      const [{ result }] = await chrome.scripting.executeScript({
-        target: { tabId: analyzedTabId },
-        func: restoreOriginal,
-      });
-      els.restoreBtn.hidden = true;
-      els.status.textContent = result
-        ? `Original text restored in ${result} paragraph${result === 1 ? "" : "s"}.`
-        : "Nothing to restore — the page has changed since it was rewritten.";
-    } catch (err) {
-      els.status.textContent = err instanceof Error ? err.message : "Restore failed.";
+    const tabId = getCurrentTabId();
+    if (tabId === null || !analyses.get(tabId)) return;
+    if (!(await isActiveTab(tabId))) {
+      els.status.textContent = "This analysis belongs to another tab. Switch back to it, or analyze this page first.";
+      return;
     }
+    try {
+      const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: restoreOriginal });
+      update(tabId, {
+        rewritten: false,
+        status: result
+          ? `Original text restored in ${result} paragraph${result === 1 ? "" : "s"}.`
+          : "Nothing to restore — the page has changed since it was rewritten.",
+      });
+    } catch (err) {
+      update(tabId, { status: err instanceof Error ? err.message : "Restore failed." });
+    }
+  });
+
+  onTabActivated((tabId) => {
+    render(tabId);
+    // Analysis is free, so a tab with nothing stored gets one. Rewriting is not, so it never
+    // starts on its own — switching tabs is navigation, not consent to spend.
+    if (!analyses.get(tabId)) whenVisible(container, () => void analyze(tabId));
+  });
+
+  onTabNavigated((tabId) => {
+    // tab-state has already dropped this tab's analysis: its block ids belong to a page that left.
+    render(tabId);
+    whenVisible(container, () => void analyze(tabId));
   });
 }

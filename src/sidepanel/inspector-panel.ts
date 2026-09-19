@@ -11,6 +11,7 @@ import {
 import { requestOutlineLabels, startInspect } from "../lib/messages";
 import type { InspectTrace, TraceState } from "../lib/messages";
 import { getActiveTabId } from "../lib/active-tab";
+import { createTabStore, getCurrentTabId, onTabActivated, onTabNavigated } from "../lib/tab-state";
 import { getSourceTracerUrl } from "../lib/provider";
 import { heuristicClaimType, splitSentences } from "../lib/claim-heuristics";
 import type { ContextSource, SourceContextReason, SourceQuality, VerifiedSource } from "../lib/source-tracer-client";
@@ -115,6 +116,20 @@ export function noExternalSourcesMessage(notChecked?: string): string {
   return notChecked ? `Not checked — ${notChecked}` : "No external verification found.";
 }
 
+/**
+ * Whether two URLs address the same document. A stored inspection is only still worth showing if
+ * its tab is on the page it was taken from; moving within a page (a fragment) is not leaving it.
+ */
+export function isSameDocument(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  return a.split("#")[0] === b.split("#")[0];
+}
+
+const CLAIMS_HINT = "Pick a paragraph on the page, or select some text and press Inspect selection.";
+const OUTLINE_HINT =
+  "Labels each block of the page as important, supporting, boilerplate, navigation or ad, as a tree.";
+
+/** Session-storage key holding every tab's finished inspection, keyed by tab id. */
 const INSPECTION_KEY = "inspection";
 
 /** A finished inspection, kept in session storage so it outlives the side panel being closed. */
@@ -228,11 +243,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   clearBtn.hidden = true;
   toolbar.append(pickBtn, inspectBtn, clearBtn);
 
-  const status = el(
-    "p",
-    "text-xs text-neutral-500 min-h-[1em]",
-    "Pick a paragraph on the page, or select some text and press Inspect selection.",
-  );
+  const status = el("p", "text-xs text-neutral-500 min-h-[1em]", CLAIMS_HINT);
 
   const passageSection = el("div", "flex flex-col gap-1.5");
   const provisionalSection = el("div", "flex flex-col gap-1.5");
@@ -253,26 +264,39 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   }
   claimsView.append(toolbar, status, passageSection, provisionalSection, claimsSection, slopSection, traceDetails, claimsFooter);
 
+  /** Discards a superseded inspection run. */
   let runId = 0;
+  /** The tab the in-flight inspection is about, so a navigation there can call it off. */
+  let runTabId: number | null = null;
+  /** Discards a superseded render, so rapid tab switching can't interleave two of them. */
+  let showRun = 0;
   let cancelInspect: (() => void) | null = null;
-  let inspectedTabId: number | null = null;
-  let inspectedTarget: InspectTarget | null = null;
+  /** Inspections by tab. Evicted by tab-state when a tab navigates or closes. */
+  const inspections = createTabStore<SavedInspection>();
+  /** Which tab's inspection the claims view is showing — what the page's badges must match. */
+  let shownTabId: number | null = null;
   /** Whether a Source Tracer endpoint is set, so cards don't claim to be checking when nothing will. */
   let tracerConfigured = false;
   /**
-   * The finished inspection, mirrored to session storage. Closing the side panel destroys the
-   * panel's JS context, and with it the card map the page's claim badges message back into — so
-   * without this, every badge on the page goes dead the moment the panel is reopened.
+   * Every tab's finished inspection, mirrored to session storage. Closing the side panel destroys
+   * the panel's JS context, and with it the card map the page's claim badges message back into —
+   * so without this, every badge on the page goes dead the moment the panel is reopened.
    */
-  let saved: SavedInspection | null = null;
+  const persisted = new Map<number, SavedInspection>();
 
-  function persistInspection(): void {
-    if (saved) void chrome.storage.session.set({ [INSPECTION_KEY]: saved });
+  function writePersisted(): void {
+    void chrome.storage.session.set({ [INSPECTION_KEY]: Object.fromEntries(persisted) });
   }
 
-  function forgetInspection(): void {
-    saved = null;
-    void chrome.storage.session.remove(INSPECTION_KEY);
+  function persistInspection(record: SavedInspection): void {
+    persisted.set(record.tabId, record);
+    writePersisted();
+  }
+
+  function forgetInspection(tabId: number): void {
+    inspections.forget(tabId);
+    persisted.delete(tabId);
+    writePersisted();
   }
   let pickTabId: number | null = null;
   const cards = new Map<number, HTMLElement>();
@@ -281,6 +305,20 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
 
   function setStatus(text: string): void {
     status.textContent = text;
+  }
+
+  /**
+   * Whether `tabId` is the tab in front of the reader. A null answer from tab-state means it hasn't
+   * resolved the starting tab yet — nothing has moved, so the tab we looked up is still the one.
+   */
+  function isCurrentTab(tabId: number): boolean {
+    const current = getCurrentTabId();
+    return current === null || current === tabId;
+  }
+
+  /** Whether `tabId` is both the tab whose results are on screen and the tab the reader is on. */
+  function onShownTab(tabId: number): boolean {
+    return shownTabId === tabId && isCurrentTab(tabId);
   }
 
   function setPicking(tabId: number | null): void {
@@ -315,10 +353,14 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     clearBtn.hidden = true;
   }
 
+  /** Flashes the inspected block on the tab whose cards are on screen — never on another tab's page. */
   async function flashInspectedBlock(): Promise<void> {
-    if (inspectedTabId === null || !inspectedTarget?.blockId) return;
-    const selector = `[data-ht-inspect-id="${inspectedTarget.blockId}"]`;
-    await chrome.scripting.executeScript({ target: { tabId: inspectedTabId }, func: flashBySelector, args: [selector] }).catch(() => {});
+    const tabId = shownTabId;
+    if (tabId === null || !isCurrentTab(tabId)) return;
+    const blockId = inspections.get(tabId)?.target.blockId;
+    if (!blockId) return;
+    const selector = `[data-ht-inspect-id="${blockId}"]`;
+    await chrome.scripting.executeScript({ target: { tabId }, func: flashBySelector, args: [selector] }).catch(() => {});
   }
 
   function renderPassage(target: InspectTarget): void {
@@ -579,10 +621,16 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     }
   }
 
+  /**
+   * Extracts claims from the reader's selection. Paid, and it needs a selection, so it only ever
+   * runs from a deliberate gesture — never from a tab switch.
+   */
   async function inspectSelection(): Promise<void> {
     const myRun = ++runId;
+    showRun++;
     cancelInspect?.();
     cancelInspect = null;
+    runTabId = null;
     resetResults();
 
     let tabId: number;
@@ -596,14 +644,15 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
       setStatus(pageAccessError(err));
       return;
     }
-    if (myRun !== runId) return;
+    // Nothing has been spent yet — the capture is local. If the reader has already moved to another
+    // tab, stop here rather than paying for a passage they have left behind.
+    if (myRun !== runId || !isCurrentTab(tabId)) return;
+    shownTabId = tabId;
     if (!target) {
       setStatus("Select a sentence or paragraph on the page first (at least a few words), or use Pick paragraph.");
       return;
     }
 
-    inspectedTabId = tabId;
-    inspectedTarget = target;
     tracerConfigured = (await getSourceTracerUrl()) !== null;
     if (myRun !== runId) return;
     addTrace(
@@ -620,55 +669,76 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
 
     setStatus("Analyzing…");
     const capturedTarget = target;
+    runTabId = tabId;
     cancelInspect = startInspect(target, {
       onTrace: (m: InspectTrace) => {
-        if (myRun === runId) addTrace(m.step, m.state, m.detail, m.ms);
+        // A trace belongs to one run on one tab; it must never open a trace panel over another's.
+        if (myRun === runId && onShownTab(tabId)) addTrace(m.step, m.state, m.detail, m.ms);
       },
+      // Results are always recorded against the tab they belong to — the spend already happened,
+      // so a reader who wandered off mid-run still finds them waiting on the way back. Only the
+      // rendering is conditional on that tab still being the one in front of them.
       onClaims: (m) => {
         if (myRun !== runId) return;
         if (m.error || !m.claims) {
+          if (!onShownTab(tabId)) return;
           claimsSection.hidden = false;
           claimsSection.replaceChildren(el("div", "text-xs text-red-300", m.error ?? "Couldn't analyze this passage."));
           provisionalSection.querySelector("div")?.replaceChildren("First read · local heuristics only");
           return;
         }
-        saved = { tabId, target: capturedTarget, claims: m.claims };
-        persistInspection();
+        const record: SavedInspection = { tabId, target: capturedTarget, claims: m.claims };
+        inspections.set(tabId, record);
+        persistInspection(record);
+        if (!onShownTab(tabId)) return;
+        // This is the newest view of this tab; abandon any swap-in still resolving, or the cards
+        // would be drawn twice.
+        showRun++;
         void renderClaims(m.claims, capturedTarget, tabId, myRun);
       },
       onSlop: (m) => {
         if (myRun !== runId) return;
-        renderSlop(m.report, m.note);
-        if (saved) {
-          saved.slop = { report: m.report, note: m.note };
-          persistInspection();
+        const record = inspections.get(tabId);
+        if (record) {
+          record.slop = { report: m.report, note: m.note };
+          persistInspection(record);
         }
+        if (onShownTab(tabId)) renderSlop(m.report, m.note);
       },
       onSources: (m) => {
         if (myRun !== runId) return;
-        renderAllSources(m);
-        if (saved) {
-          saved.sources = {
+        const record = inspections.get(tabId);
+        if (record) {
+          record.sources = {
             sourcesByQuote: m.sourcesByQuote,
             contextsByQuote: m.contextsByQuote,
             notCheckedByQuote: m.notCheckedByQuote,
           };
-          persistInspection();
+          persistInspection(record);
         }
+        if (onShownTab(tabId)) renderAllSources(m);
       },
       onDone: () => {
         if (myRun !== runId) return;
         cancelInspect = null;
+        runTabId = null;
+        if (!onShownTab(tabId)) return;
         setStatus(cards.size ? `Done — ${cards.size} claim${cards.size === 1 ? "" : "s"}. Click a badge on the page to jump to its card.` : "Done.");
       },
     });
   }
 
+  /** Takes the page out of pick mode, wherever it was armed. */
+  async function stopPicking(): Promise<void> {
+    const tabId = pickTabId;
+    if (tabId === null) return;
+    setPicking(null);
+    await chrome.scripting.executeScript({ target: { tabId }, func: stopPickMode }).catch(() => {});
+  }
+
   async function togglePick(): Promise<void> {
     if (pickTabId !== null) {
-      const tabId = pickTabId;
-      setPicking(null);
-      await chrome.scripting.executeScript({ target: { tabId }, func: stopPickMode }).catch(() => {});
+      await stopPicking();
       setStatus("Picking cancelled.");
       return;
     }
@@ -683,44 +753,78 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   }
 
   async function clearMarks(): Promise<void> {
+    const tabId = shownTabId;
+    if (tabId === null) return;
     runId++;
+    showRun++;
     cancelInspect?.();
     cancelInspect = null;
-    if (inspectedTabId !== null) {
-      await chrome.scripting.executeScript({ target: { tabId: inspectedTabId }, func: clearClaimMarks }).catch(() => {});
-    }
-    inspectedTarget = null;
-    forgetInspection();
+    runTabId = null;
+    await chrome.scripting.executeScript({ target: { tabId }, func: clearClaimMarks }).catch(() => {});
+    forgetInspection(tabId);
     resetResults();
     setStatus("Cleared.");
   }
 
   /**
-   * Rebuilds the last inspection after the side panel was closed and reopened, then re-places the
-   * page badges so their click handlers point at the cards that now exist.
+   * Puts `tabId`'s inspection on screen, or a clean empty state if it has none — on a tab switch,
+   * on a navigation, and when the panel is reopened with results still in session storage.
+   *
+   * Re-running `markClaims` here is what keeps the page's numbered badges working: the card
+   * elements are rebuilt from scratch on every swap-in, so the badges have to be re-placed against
+   * the `cards` map that now exists. Skip that and every badge on the page points at nothing.
+   *
+   * Nothing paid runs from here. Claim extraction needs a selection and a deliberate press.
    */
-  async function restoreInspection(): Promise<void> {
-    const stored = await chrome.storage.session.get(INSPECTION_KEY);
-    const previous = stored[INSPECTION_KEY] as SavedInspection | undefined;
-    if (!previous?.claims?.length) return;
-    if (runId !== 0 || inspectedTarget) return; // the reader already started something newer
+  async function showTab(tabId: number): Promise<void> {
+    const mine = ++showRun;
+    shownTabId = tabId;
+    resetResults();
+    showOutline(tabId);
 
-    saved = previous;
-    inspectedTabId = previous.tabId;
-    inspectedTarget = previous.target;
+    let record = inspections.get(tabId) ?? persisted.get(tabId) ?? null;
+    if (record?.claims?.length) {
+      // Valid only while the tab is still on the page it was taken from. In memory tab-state has
+      // usually dropped it already; from session storage nothing has checked yet, and a tab that
+      // navigated while the panel was closed must not get its old results handed back.
+      const url = await chrome.tabs
+        .get(tabId)
+        .then((tab) => tab.url)
+        .catch(() => undefined);
+      if (mine !== showRun) return;
+      if (isSameDocument(url, record.target.url)) inspections.set(tabId, record);
+      else {
+        forgetInspection(tabId);
+        record = null;
+      }
+    } else {
+      record = null;
+    }
+
+    if (!record) {
+      setStatus(CLAIMS_HINT);
+      return;
+    }
+
     tracerConfigured = (await getSourceTracerUrl()) !== null;
+    if (mine !== showRun) return;
 
-    renderPassage(previous.target);
-    await renderClaims(previous.claims, previous.target, previous.tabId, runId);
-    if (previous.slop) renderSlop(previous.slop.report, previous.slop.note);
-    if (previous.sources) renderAllSources(previous.sources);
-    setStatus(`Showing your last inspection — ${previous.claims.length} claim${previous.claims.length === 1 ? "" : "s"}.`);
+    renderPassage(record.target);
+    await renderClaims(record.claims, record.target, tabId, runId);
+    if (mine !== showRun) return;
+    if (record.slop) renderSlop(record.slop.report, record.slop.note);
+    if (record.sources) renderAllSources(record.sources);
+    setStatus(
+      `${record.claims.length} claim${record.claims.length === 1 ? "" : "s"}. Click a badge on the page to jump to its card.`,
+    );
   }
 
   pickBtn.addEventListener("click", togglePick);
   inspectBtn.addEventListener("click", inspectSelection);
   clearBtn.addEventListener("click", clearMarks);
 
+  // A badge on the page is only live while that tab's cards are the ones on screen. `shownTabId`
+  // is the whole badge-to-card contract: same tab, same `cards` map, same numbering.
   chrome.runtime.onMessage.addListener((message, sender) => {
     if (sender.id !== chrome.runtime.id || sender.tab?.id === undefined) return;
     const fromTab = sender.tab.id;
@@ -732,7 +836,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     } else if (message?.type === "HT_PICK_CANCELLED" && fromTab === pickTabId) {
       setPicking(null);
       setStatus("Picking cancelled.");
-    } else if (message?.type === "HT_CLAIM_CLICK" && fromTab === inspectedTabId) {
+    } else if (message?.type === "HT_CLAIM_CLICK" && fromTab === shownTabId) {
       const card = cards.get(Number(message.n));
       if (!card) return;
       options.activate();
@@ -753,11 +857,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   showOnPageLabel.append(showOnPage, el("span", "", "Show labels on page"));
   outlineToolbar.append(outlineBtn, showOnPageLabel);
 
-  const outlineStatus = el(
-    "p",
-    "text-xs text-neutral-500 min-h-[1em]",
-    "Labels each block of the page as important, supporting, boilerplate, navigation or ad, as a tree.",
-  );
+  const outlineStatus = el("p", "text-xs text-neutral-500 min-h-[1em]", OUTLINE_HINT);
   const legend = el("div", "flex flex-wrap gap-1.5");
   const tree = el("div", "flex flex-col font-mono text-xs");
   const outlineFooter = el(
@@ -769,33 +869,51 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   outlineFooter.hidden = true;
   outlineView.append(outlineToolbar, outlineStatus, legend, tree, outlineFooter);
 
-  let outlineRun = 0;
-  let outlineTabId: number | null = null;
-  let outlineBlocks: OutlineBlock[] = [];
-  const hiddenLabels = new Set<OutlineLabel>();
+  /** One tab's outline. Evicted by tab-state when that tab navigates or closes. */
+  interface OutlineState {
+    blocks: OutlineBlock[];
+    hidden: Set<OutlineLabel>;
+    showOnPage: boolean;
+    status: string;
+  }
 
-  function renderOutline(): void {
+  let outlineRun = 0;
+  /** The tab an outline build is running for, so the button only reads busy on that tab. */
+  let outlineBusyTabId: number | null = null;
+  const outlines = createTabStore<OutlineState>();
+
+  function setOutlineStatus(tabId: number, text: string): void {
+    const state = outlines.get(tabId);
+    if (state) state.status = text;
+    if (isCurrentTab(tabId)) outlineStatus.textContent = text;
+  }
+
+  function renderOutline(tabId: number | null): void {
+    const state = outlines.get(tabId);
+    const blocks = state?.blocks ?? [];
+    const hidden = state?.hidden ?? new Set<OutlineLabel>();
+
     const counts = new Map<OutlineLabel, number>();
-    for (const b of outlineBlocks) counts.set(b.label, (counts.get(b.label) ?? 0) + 1);
+    for (const b of blocks) counts.set(b.label, (counts.get(b.label) ?? 0) + 1);
 
     legend.replaceChildren();
     for (const label of OUTLINE_ORDER) {
       const count = counts.get(label);
       if (!count) continue;
-      const hidden = hiddenLabels.has(label);
-      const chip = el("button", `${CHIP} ${OUTLINE_CHIP[label]} ${hidden ? "opacity-40 line-through" : ""}`, `${OUTLINE_LABEL_TEXT[label]} ${count}`);
-      chip.title = hidden ? "Show these blocks" : "Hide these blocks";
+      const off = hidden.has(label);
+      const chip = el("button", `${CHIP} ${OUTLINE_CHIP[label]} ${off ? "opacity-40 line-through" : ""}`, `${OUTLINE_LABEL_TEXT[label]} ${count}`);
+      chip.title = off ? "Show these blocks" : "Hide these blocks";
       chip.addEventListener("click", () => {
-        if (hidden) hiddenLabels.delete(label);
-        else hiddenLabels.add(label);
-        renderOutline();
+        if (off) hidden.delete(label);
+        else hidden.add(label);
+        renderOutline(tabId);
       });
       legend.appendChild(chip);
     }
 
     tree.replaceChildren();
-    for (const block of outlineBlocks) {
-      if (hiddenLabels.has(block.label)) continue;
+    for (const block of blocks) {
+      if (hidden.has(block.label)) continue;
       const row = el(
         "button",
         "flex items-center gap-2 w-full text-left py-1 pr-1 rounded hover:bg-neutral-800 min-w-0",
@@ -809,84 +927,160 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
         el("span", `truncate font-sans ${isHeading ? "text-neutral-100 font-medium" : "text-neutral-300"}`, block.text),
       );
       row.addEventListener("click", () => {
-        if (outlineTabId === null) return;
+        // Rows only ever belong to the tab on screen; this keeps a stale one from reaching elsewhere.
+        if (tabId === null || !isCurrentTab(tabId)) return;
         const selector = `[data-ht-outline-id="${block.id}"]`;
-        void chrome.scripting.executeScript({ target: { tabId: outlineTabId }, func: flashBySelector, args: [selector] }).catch(() => {});
+        void chrome.scripting.executeScript({ target: { tabId }, func: flashBySelector, args: [selector] }).catch(() => {});
       });
       tree.appendChild(row);
     }
   }
 
-  async function syncLabelsToPage(): Promise<void> {
-    if (outlineTabId === null) return;
-    const labels = outlineBlocks.map((b) => ({ id: b.id, label: b.label }));
+  /** Puts `tabId`'s outline on screen, or the empty state. Never starts a build — that one is paid. */
+  function showOutline(tabId: number | null): void {
+    const state = outlines.get(tabId);
+    showOnPage.checked = state?.showOnPage ?? false;
+    showOnPage.disabled = !state;
+    outlineFooter.hidden = !state;
+    outlineBtn.disabled = tabId !== null && outlineBusyTabId === tabId;
+    outlineStatus.textContent = state?.status || OUTLINE_HINT;
+    renderOutline(tabId);
+  }
+
+  async function syncLabelsToPage(tabId: number): Promise<void> {
+    const state = outlines.get(tabId);
+    if (!state) return;
+    const labels = state.blocks.map((b) => ({ id: b.id, label: b.label }));
     await chrome.scripting
-      .executeScript({ target: { tabId: outlineTabId }, func: applyOutlineLabels, args: [labels, showOnPage.checked] })
+      .executeScript({ target: { tabId }, func: applyOutlineLabels, args: [labels, state.showOnPage] })
       .catch(() => {});
   }
 
+  /**
+   * Reads the page and labels every block. The refinement pass is an LLM call, so this only ever
+   * runs from a press of "Outline this page" — switching to a tab shows what it already has.
+   */
   async function buildOutline(): Promise<void> {
     const myRun = ++outlineRun;
-    outlineBtn.disabled = true;
-    outlineStatus.textContent = "Reading the page…";
+    let tabId: number | null = null;
     try {
-      if (outlineTabId !== null && showOnPage.checked) {
-        // Remove the previous page's outlines before re-reading.
+      tabId = getCurrentTabId() ?? (await getActiveTabId());
+      outlineBusyTabId = tabId;
+      outlineBtn.disabled = true;
+
+      const previous = outlines.get(tabId);
+      if (previous?.showOnPage) {
+        // Take the old outlines off this page before re-reading it.
         await chrome.scripting
-          .executeScript({ target: { tabId: outlineTabId }, func: applyOutlineLabels, args: [[], false] })
+          .executeScript({ target: { tabId }, func: applyOutlineLabels, args: [[], false] })
           .catch(() => {});
       }
-      const tabId = await getActiveTabId();
+      if (isCurrentTab(tabId)) outlineStatus.textContent = "Reading the page…";
+
       const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: extractOutline });
       if (myRun !== outlineRun) return;
       if (!result || !result.blocks.length) {
-        outlineStatus.textContent = "No readable blocks found on this page.";
-        outlineBlocks = [];
-        renderOutline();
+        outlines.forget(tabId);
+        if (isCurrentTab(tabId)) {
+          showOutline(tabId);
+          outlineStatus.textContent = "No readable blocks found on this page.";
+        }
         return;
       }
 
-      outlineTabId = tabId;
-      outlineBlocks = result.blocks;
-      showOnPage.disabled = false;
-      outlineFooter.hidden = false;
-      renderOutline();
-      await syncLabelsToPage();
+      const state: OutlineState = {
+        blocks: result.blocks,
+        hidden: previous?.hidden ?? new Set<OutlineLabel>(),
+        showOnPage: previous?.showOnPage ?? false,
+        status: "",
+      };
+      outlines.set(tabId, state);
+      if (isCurrentTab(tabId)) showOutline(tabId);
+      await syncLabelsToPage(tabId);
 
-      const toLabel = outlineBlocks.filter((b) => !b.fixed);
+      const toLabel = state.blocks.filter((b) => !b.fixed);
       if (!toLabel.length) {
-        outlineStatus.textContent = `${outlineBlocks.length} blocks.`;
+        setOutlineStatus(tabId, `${state.blocks.length} blocks.`);
         return;
       }
-      outlineStatus.textContent = `${outlineBlocks.length} blocks · first-pass labels from page structure, refining…`;
+      setOutlineStatus(tabId, `${state.blocks.length} blocks · first-pass labels from page structure, refining…`);
+
       const reply = await requestOutlineLabels(
         result.title,
         toLabel.map((b) => ({ id: b.id, tag: b.tag, text: b.text })),
       );
-      if (myRun !== outlineRun) return;
+      // A gone state means the tab navigated or closed mid-call: the labels describe a page that
+      // is no longer there, so they are dropped rather than shown against whatever replaced it.
+      if (myRun !== outlineRun || outlines.get(tabId) !== state) return;
       if (reply.error || !reply.labels) {
-        outlineStatus.textContent = `${outlineBlocks.length} blocks · labels are from page structure only (${reply.error ?? "no reply"}).`;
+        setOutlineStatus(tabId, `${state.blocks.length} blocks · labels are from page structure only (${reply.error ?? "no reply"}).`);
         return;
       }
 
       const refined = new Map(reply.labels.map((l) => [l.id, l.label]));
-      outlineBlocks = outlineBlocks.map((b) => {
+      state.blocks = state.blocks.map((b) => {
         const label = refined.get(b.id);
         return b.fixed || !label ? b : { ...b, label };
       });
-      renderOutline();
-      await syncLabelsToPage();
-      const important = outlineBlocks.filter((b) => b.label === "important").length;
-      outlineStatus.textContent = `${outlineBlocks.length} blocks · ${important} important. Click a row to find it on the page.`;
+      if (isCurrentTab(tabId)) renderOutline(tabId);
+      await syncLabelsToPage(tabId);
+      const important = state.blocks.filter((b) => b.label === "important").length;
+      setOutlineStatus(tabId, `${state.blocks.length} blocks · ${important} important. Click a row to find it on the page.`);
     } catch (err) {
-      if (myRun === outlineRun) outlineStatus.textContent = pageAccessError(err);
+      if (myRun === outlineRun && (tabId === null || isCurrentTab(tabId))) {
+        outlineStatus.textContent = pageAccessError(err);
+      }
     } finally {
-      if (myRun === outlineRun) outlineBtn.disabled = false;
+      if (myRun === outlineRun) {
+        outlineBusyTabId = null;
+        outlineBtn.disabled = false;
+      }
     }
   }
 
   outlineBtn.addEventListener("click", buildOutline);
-  showOnPage.addEventListener("change", () => void syncLabelsToPage());
+  showOnPage.addEventListener("change", () => {
+    const tabId = getCurrentTabId();
+    const state = outlines.get(tabId);
+    if (tabId === null || !state) return;
+    state.showOnPage = showOnPage.checked;
+    void syncLabelsToPage(tabId);
+  });
 
-  void restoreInspection();
+  // ---- Following the reader ---------------------------------------------------------------------
+  onTabActivated((tabId) => {
+    // Picking is a gesture on the page in front of you; it doesn't follow the reader to another.
+    if (pickTabId !== null && pickTabId !== tabId) void stopPicking();
+    void showTab(tabId);
+  });
+
+  onTabNavigated((tabId) => {
+    // The page all of this was about is gone. Call off a run still going for it rather than
+    // spending the rest of it on a passage that no longer exists, and drop the stored copy so
+    // reopening the panel can't resurrect it.
+    if (runTabId === tabId) {
+      runId++;
+      cancelInspect?.();
+      cancelInspect = null;
+      runTabId = null;
+    }
+    forgetInspection(tabId);
+    void showTab(tabId);
+  });
+
+  void (async () => {
+    // Inspections survive the panel closing; each is checked against its tab's current page before
+    // it is shown, in showTab.
+    const stored = await chrome.storage.session.get(INSPECTION_KEY);
+    const byTab = stored[INSPECTION_KEY] as Record<string, SavedInspection> | undefined;
+    for (const [key, record] of Object.entries(byTab ?? {})) {
+      const tabId = Number(key);
+      if (Number.isInteger(tabId) && record?.claims?.length) persisted.set(tabId, record);
+    }
+    try {
+      await showTab(getCurrentTabId() ?? (await getActiveTabId()));
+    } catch {
+      // No tab to attach to yet; the first tab event will bring one.
+    }
+  })();
 }
