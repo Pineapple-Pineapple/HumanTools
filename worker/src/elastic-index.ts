@@ -17,7 +17,7 @@ export class ElasticSourceIndex {
   constructor(
     private readonly baseUrl: string,
     private readonly apiKey: string,
-    private readonly fetcher: Fetcher = fetch,
+    private readonly fetcher: Fetcher = (input, init) => globalThis.fetch(input, init),
   ) {}
 
   async index(source: VerifiedSource, verifiedQuote: string): Promise<void> {
