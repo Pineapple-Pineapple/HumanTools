@@ -1,14 +1,17 @@
 import type { PageModel } from "../lib/types";
 
-const MIN_BLOCK_LENGTH = 40;
-const EXCLUDED_ANCESTOR_SELECTOR = "nav, header, footer, aside, script, style";
-
 /**
- * Self-contained: invoked via chrome.scripting.executeScript by reference, so it
- * cannot close over anything from the module scope (Chrome re-serializes the
- * function body into the page's isolated world). Only `import type` is safe here.
+ * Self-contained: invoked via chrome.scripting.executeScript by reference, so
+ * Chrome re-serializes only this function's own source into the page's isolated
+ * world. It cannot close over anything from module scope — not imports, not
+ * sibling consts — those would throw ReferenceError at injection time. Only
+ * `import type` is safe (erased at compile time) and literals declared inside
+ * the function body itself.
  */
 export function extractPageBlocks(): PageModel {
+  const MIN_BLOCK_LENGTH = 40;
+  const EXCLUDED_ANCESTOR_SELECTOR = "nav, header, footer, aside, script, style";
+
   const paragraphs = Array.from(document.querySelectorAll("p"));
   const blocks: { id: string; text: string }[] = [];
 
@@ -25,11 +28,11 @@ export function extractPageBlocks(): PageModel {
   return { url: location.href, blocks };
 }
 
-const REWRITTEN_CLASS = "__ht-rewritten";
-const STYLE_ID = "__ht-style";
-
 /** Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. */
 export function applyRewrites(patches: { id: string; text: string }[]): void {
+  const REWRITTEN_CLASS = "__ht-rewritten";
+  const STYLE_ID = "__ht-style";
+
   if (!document.getElementById(STYLE_ID)) {
     const style = document.createElement("style");
     style.id = STYLE_ID;
@@ -48,6 +51,9 @@ export function applyRewrites(patches: { id: string; text: string }[]): void {
 
 /** Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. */
 export function restoreOriginal(): void {
+  const REWRITTEN_CLASS = "__ht-rewritten";
+  const STYLE_ID = "__ht-style";
+
   document.querySelectorAll(`.${REWRITTEN_CLASS}`).forEach((el) => {
     if (!(el instanceof HTMLElement)) return;
     el.textContent = el.title || el.textContent;
