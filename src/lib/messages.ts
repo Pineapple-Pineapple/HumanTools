@@ -1,5 +1,4 @@
 import type { Block, ClaimCard, Grade, InspectTarget, OutlineLabel, RewriteFormat, SlopReport } from "./types";
-import type { FinanceValidation, RawFinanceSignals } from "./finance-types";
 import type { ContextSource, VerifiedSource } from "./source-tracer-client";
 
 export interface RewritePatch {
@@ -230,53 +229,6 @@ export function startInspect(target: InspectTarget, handlers: InspectHandlers): 
   });
 
   const request: InspectRequest = { type: "INSPECT_REQUEST", target };
-  port.postMessage(request);
-  return () => port.disconnect();
-}
-
-export interface FinanceRequest {
-  type: "FINANCE_REQUEST";
-  signals: RawFinanceSignals;
-}
-
-export interface FinanceTrace {
-  type: "FINANCE_TRACE";
-  step: string;
-  state: TraceState;
-  detail?: string;
-  ms?: number;
-}
-
-export interface FinanceResult {
-  type: "FINANCE_RESULT";
-  validation?: FinanceValidation;
-  error?: string;
-}
-
-export type FinanceMessage = FinanceTrace | FinanceResult;
-
-export interface FinanceHandlers {
-  onTrace: (msg: FinanceTrace) => void;
-  onResult: (msg: FinanceResult) => void;
-}
-
-/**
- * Opens a "finance" port for one page. Trace steps stream as the model call and the validator run,
- * the way startInspect reports its pipeline. Returns a cancel function.
- */
-export function startFinanceGraph(signals: RawFinanceSignals, handlers: FinanceHandlers): () => void {
-  const port = chrome.runtime.connect({ name: "finance" });
-
-  port.onMessage.addListener((message: FinanceMessage) => {
-    if (message.type === "FINANCE_TRACE") {
-      handlers.onTrace(message);
-      return;
-    }
-    handlers.onResult(message);
-    port.disconnect();
-  });
-
-  const request: FinanceRequest = { type: "FINANCE_REQUEST", signals };
   port.postMessage(request);
   return () => port.disconnect();
 }
