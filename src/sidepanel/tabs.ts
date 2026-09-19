@@ -1,4 +1,5 @@
 export const PANEL_NAMES = [
+  "Accessibility",
   "Elements",
   "Network",
   "Memory",
@@ -7,14 +8,14 @@ export const PANEL_NAMES = [
   "Console",
   "Security",
   "Application",
-  "Accessibility",
 ] as const;
 
 const ENABLED_PANEL = "Accessibility";
 
 export function renderTabs(container: HTMLElement): void {
   const strip = document.createElement("div");
-  strip.className = "flex border-b border-neutral-700 text-xs";
+  strip.className =
+    "flex flex-nowrap overflow-x-auto overflow-y-hidden border-b border-neutral-700 text-xs [scrollbar-width:none] [&::-webkit-scrollbar]:hidden";
 
   for (const name of PANEL_NAMES) {
     const tab = document.createElement("button");
@@ -23,12 +24,12 @@ export function renderTabs(container: HTMLElement): void {
 
     if (isEnabled) {
       tab.className =
-        "px-3 py-2 border-b-2 border-amber-500 text-neutral-100 font-medium";
+        "shrink-0 whitespace-nowrap px-3 py-2 border-b-2 border-amber-500 text-neutral-100 font-medium";
     } else {
       tab.disabled = true;
       tab.setAttribute("aria-disabled", "true");
       tab.title = "Not available in this build";
-      tab.className = "px-3 py-2 text-neutral-500 opacity-50 cursor-not-allowed";
+      tab.className = "shrink-0 whitespace-nowrap px-3 py-2 text-neutral-500 opacity-50 cursor-not-allowed";
     }
 
     strip.appendChild(tab);
