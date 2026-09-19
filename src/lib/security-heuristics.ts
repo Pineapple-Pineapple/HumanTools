@@ -6,6 +6,9 @@
  * "fine".
  */
 
+import { registrableDomain } from "./public-suffix";
+import { describeHostname } from "./punycode";
+
 export interface FieldSignal {
   tag: "input" | "select" | "textarea";
   type: string;
@@ -67,6 +70,8 @@ export interface SecuritySignals {
   codeSourcesTruncated: boolean;
   mixedContent: MixedContentSignal[];
   mixedContentTruncated: boolean;
+  /** Frames declared in this document, whether or not the collector got inside them. */
+  frameCount: number;
   /** Things the walker itself could not reach, reported verbatim to the reader. */
   notCollected: string[];
 }
@@ -151,17 +156,6 @@ const URL_SHORTENERS: ReadonlySet<string> = new Set([
   "fb.me", "g.co", "qr.ae", "v.gd", "soo.gd", "clck.ru", "u.to", "shrtco.de",
 ]);
 
-/** Suffixes where the registrable name is three labels deep, not two. Not a public suffix list. */
-const MULTI_LABEL_SUFFIXES: ReadonlySet<string> = new Set([
-  "co.uk", "org.uk", "ac.uk", "gov.uk", "net.uk", "sch.uk", "me.uk", "ltd.uk", "plc.uk",
-  "com.au", "net.au", "org.au", "edu.au", "gov.au", "co.nz", "net.nz", "org.nz",
-  "com.br", "com.mx", "com.ar", "com.co", "com.pe", "com.ve",
-  "co.jp", "ne.jp", "or.jp", "ac.jp", "go.jp", "co.kr", "or.kr",
-  "co.za", "org.za", "co.in", "net.in", "org.in", "gov.in", "ac.in",
-  "com.sg", "com.my", "com.hk", "com.tw", "com.cn", "net.cn", "org.cn", "gov.cn",
-  "com.tr", "com.ua", "com.pl", "co.il", "com.eg", "com.sa", "com.ng", "co.th", "com.ph", "com.vn",
-]);
-
 /**
  * Last labels that make a piece of anchor text read as a web address. Deliberately a list rather
  * than "anything after a dot": without it, "Vue.js" or "index.php" read as hostnames and every
@@ -198,16 +192,14 @@ export function hasPunycodeLabel(hostname: string): boolean {
 
 /**
  * The registrable part of a hostname, so "news.example.co.uk" and "example.co.uk" are not reported
- * as different sites. Backed by a short suffix list, which is why the panel says so in
- * "what we could not check".
+ * as different sites. Backed by the real Public Suffix List. A hostname that is nothing but a public
+ * suffix ("co.uk" on its own) has no registrable name in it, and is compared as itself rather than
+ * being silently widened to "uk".
  */
 export function effectiveDomain(hostname: string): string {
   const host = hostname.toLowerCase().replace(/\.$/, "");
   if (!host || isIpAddressHost(host)) return host;
-  const labels = host.split(".");
-  if (labels.length <= 2) return host;
-  if (MULTI_LABEL_SUFFIXES.has(labels.slice(-2).join("."))) return labels.slice(-3).join(".");
-  return labels.slice(-2).join(".");
+  return registrableDomain(host) || host;
 }
 
 export function isUrlShortener(hostname: string): boolean {
@@ -303,11 +295,39 @@ function capEvidence(items: string[], limit: number): string[] {
   return [...items.slice(0, limit), `…and ${items.length - limit} more`];
 }
 
-function destinationOf(form: FormSignal, pageOrigin: string): string {
+function destinationOf(form: FormSignal, context: Context): string {
   if (!form.action) return form.actionRaw ? `not a web address (${form.actionRaw})` : "unknown";
   const origin = parseOrigin(form.action);
-  if (origin && origin === pageOrigin) return "this site";
+  if (origin && origin === context.origin) return context.frameUrl ? hostLabel(context.host) : "this site";
   return parseHost(form.action) || form.action;
+}
+
+/**
+ * One document the collector reached: the top page, or one frame inside it. Each carries its own
+ * origin, because "posts somewhere else" means somewhere other than the document the form is in —
+ * a payment form inside a payment provider's frame is posting home, not off-site.
+ */
+interface Context {
+  signals: SecuritySignals;
+  /** "" for the top document; the frame's own address otherwise. */
+  frameUrl: string;
+  origin: string;
+  host: string;
+  domain: string;
+}
+
+function contextOf(signals: SecuritySignals, isFrame: boolean): Context {
+  const host = signals.hostname.toLowerCase();
+  return { signals, frameUrl: isFrame ? signals.url : "", origin: signals.origin, host, domain: effectiveDomain(host) };
+}
+
+/** Evidence says which document it came from, or a frame's form reads as if the page wrote it. */
+function inFrame(context: Context, text: string): string {
+  return context.frameUrl ? `${text} — in frame ${context.frameUrl}` : text;
+}
+
+function whereForm(context: Context): string {
+  return context.frameUrl ? `inside a frame from ${hostLabel(context.host)}` : "on this page";
 }
 
 const SEVERITY_RANK: Record<Severity, number> = { high: 0, medium: 1, low: 2 };
@@ -332,25 +352,33 @@ export function findingsSummary(findings: readonly Finding[]): string {
   return `${findings.length} ${noun} to explain (${parts.join(", ")}).`;
 }
 
-export function readSecuritySignals(signals: SecuritySignals): SecurityReading {
+export function readSecuritySignals(signals: SecuritySignals, frames: readonly SecuritySignals[] = []): SecurityReading {
   const findings: Finding[] = [];
   const asks: SensitiveAsk[] = [];
   const pageHost = signals.hostname.toLowerCase();
-  const pageDomain = effectiveDomain(pageHost);
   const transport = signals.protocol === "https:" ? "https" : signals.protocol === "http:" ? "http" : "other";
 
-  const formKinds = signals.forms.map((form) => ({ form, kinds: sensitiveKinds(form) }));
-  for (const { form, kinds } of formKinds) {
+  // The top document and every frame the collector got inside, each read against its own origin.
+  const contexts: Context[] = [contextOf(signals, false), ...frames.map((frame) => contextOf(frame, true))];
+
+  const formEntries = contexts.flatMap((context) =>
+    context.signals.forms.map((form) => ({ context, form, kinds: sensitiveKinds(form) })),
+  );
+  for (const { context, form, kinds } of formEntries) {
+    const formLabel = context.frameUrl ? `${form.label}, in a frame from ${hostLabel(context.host)}` : form.label;
     for (const kind of kinds) {
-      asks.push({ kind, label: SENSITIVE_LABELS[kind], formLabel: form.label, destination: destinationOf(form, signals.origin) });
+      asks.push({ kind, label: SENSITIVE_LABELS[kind], formLabel, destination: destinationOf(form, context) });
     }
   }
+
+  const looseEntries = contexts.flatMap((context) =>
+    context.signals.looseSensitiveFields.map((field) => ({ context, field, kind: classifyField(field) })),
+  );
   const looseKinds: SensitiveKind[] = [];
-  for (const field of signals.looseSensitiveFields) {
-    const kind = classifyField(field);
-    if (kind && !looseKinds.includes(kind)) looseKinds.push(kind);
+  for (const entry of looseEntries) {
+    if (entry.kind && !looseKinds.includes(entry.kind)) looseKinds.push(entry.kind);
   }
-  const pageAsksForSomethingHigh = hasHighSensitivity([...formKinds.flatMap((entry) => entry.kinds), ...looseKinds]);
+  const pageAsksForSomethingHigh = hasHighSensitivity([...formEntries.flatMap((entry) => entry.kinds), ...looseKinds]);
 
   // ---- Transport -------------------------------------------------------------------------------
   if (transport === "http") {
@@ -382,39 +410,50 @@ export function readSecuritySignals(signals: SecuritySignals): SecurityReading {
       severity: "medium",
       title: "This page's hostname is an encoded internationalized name",
       explanation:
-        "Hostnames beginning xn-- are the encoded form of a name written in non-Latin or accented characters. That is entirely normal for many of the world's sites, and it is also how a name is made to look like a familiar brand in the address bar. What it renders as is not shown here.",
-      evidence: [hostLabel(pageHost)],
+        "Hostnames beginning xn-- are the encoded form of a name written in non-Latin or accented characters. That is entirely normal for much of the world's web, and it is also how a name is built to read like a familiar brand in the address bar. Both forms are below — the name as it is stored, and the name as the address bar draws it. Characters that would otherwise be invisible are shown as their code points.",
+      evidence: [describeHostname(pageHost)],
     });
   }
 
-  if (signals.mixedContent.length > 0) {
+  const mixed = contexts.flatMap((context) => context.signals.mixedContent.map((item) => ({ context, item })));
+  if (mixed.length > 0) {
     findings.push({
       kind: "mixed_content",
       severity: "medium",
-      title: `This encrypted page pulls in ${signals.mixedContent.length} resource${signals.mixedContent.length === 1 ? "" : "s"} over plain http`,
+      // Frames are read too, so this can come from an encrypted frame inside a page that is not
+      // itself encrypted. The wording follows whichever is true rather than assuming the page is.
+      title:
+        transport === "https"
+          ? `This encrypted page pulls in ${mixed.length} resource${mixed.length === 1 ? "" : "s"} over plain http`
+          : `${mixed.length} resource${mixed.length === 1 ? " is" : "s are"} requested over plain http inside this page`,
       explanation:
-        "The page arrived encrypted but asks the browser for parts of itself over an unencrypted connection. Those parts can be watched or swapped in transit; when one of them is a script, whoever swaps it controls the page. Browsers block most of this, so some of these may never have loaded.",
+        transport === "https"
+          ? "The page arrived encrypted but asks the browser for parts of itself over an unencrypted connection. Those parts can be watched or swapped in transit; when one of them is a script, whoever swaps it controls the page. Browsers block most of this, so some of these may never have loaded."
+          : "A document on this page arrived encrypted and then asked the browser for parts of itself over an unencrypted connection. Those parts can be watched or swapped in transit; when one of them is a script, whoever swaps it controls the document it runs in. Browsers block most of this, so some of these may never have loaded.",
       evidence: capEvidence(
-        signals.mixedContent.map((item) => `${item.kind}: ${item.url}`),
+        mixed.map(({ context, item }) => inFrame(context, `${item.kind}: ${item.url}`)),
         8,
       ),
     });
   }
 
   // ---- Forms -----------------------------------------------------------------------------------
-  for (const { form, kinds } of formKinds) {
+  for (const { context, form, kinds } of formEntries) {
     const high = hasHighSensitivity(kinds);
     const asksFor = kinds.length ? kinds.map((kind) => SENSITIVE_LABELS[kind].toLowerCase()).join(", ") : "no identified fields";
+    const highKinds = kinds.filter((kind) => HIGH_SENSITIVITY.has(kind)).map((kind) => SENSITIVE_LABELS[kind].toLowerCase()).join(" and ");
     const destinations = [form.action, ...form.formActions].filter(Boolean);
+    const where = whereForm(context);
+    const frameEvidence = context.frameUrl ? [`In frame: ${context.frameUrl}`] : [];
 
     if (!form.action) {
       findings.push({
         kind: "form_action_not_a_web_address",
         severity: high ? "medium" : "low",
-        title: `A form on this page does not post to a web address`,
+        title: `A form ${where} does not post to a web address`,
         explanation:
           "This form's destination is not an http(s) URL — it is a mail link, a script call, or missing entirely. Where what you type goes is then decided by code on the page, which is not something this panel can read.",
-        evidence: [`${form.label} → ${form.actionRaw || "(no action)"}`, `Asks for: ${asksFor}`],
+        evidence: [`${form.label} → ${form.actionRaw || "(no action)"}`, `Asks for: ${asksFor}`, ...frameEvidence],
       });
     }
 
@@ -427,45 +466,42 @@ export function readSecuritySignals(signals: SecuritySignals): SecurityReading {
         findings.push({
           kind: "form_posts_over_http",
           severity: high ? "high" : "medium",
-          title: high
-            ? `A form asking for ${kinds.filter((kind) => HIGH_SENSITIVITY.has(kind)).map((kind) => SENSITIVE_LABELS[kind].toLowerCase()).join(" and ")} posts over plain http`
-            : "A form on this page posts over plain http",
+          title: high ? `A form ${where} asking for ${highKinds} posts over plain http` : `A form ${where} posts over plain http`,
           explanation: high
             ? "What is typed into this form is sent unencrypted. Anyone on the path — the local network, an ISP, a proxy — can read it as it goes past, and this is the single thing on this page most worth not doing."
             : "What is typed into this form is sent unencrypted and can be read or altered on the way.",
-          evidence: [`${form.label} → ${destination}`, `Asks for: ${asksFor}`],
+          evidence: [`${form.label} → ${destination}`, `Asks for: ${asksFor}`, ...frameEvidence],
         });
         continue;
       }
 
-      if (origin && signals.origin && origin !== signals.origin && effectiveDomain(host) !== pageDomain) {
+      if (origin && context.origin && origin !== context.origin && effectiveDomain(host) !== context.domain) {
         findings.push({
           kind: "form_posts_off_site",
           severity: high ? "high" : "low",
           title: high
-            ? `A form asking for ${kinds.filter((kind) => HIGH_SENSITIVITY.has(kind)).map((kind) => SENSITIVE_LABELS[kind].toLowerCase()).join(" and ")} posts to ${hostLabel(host)}`
-            : `A form on this page posts to ${hostLabel(host)}`,
+            ? `A form ${where} asking for ${highKinds} posts to ${hostLabel(host)}`
+            : `A form ${where} posts to ${hostLabel(host)}`,
           explanation: high
-            ? `This form submits to ${hostLabel(host)}, which is not ${hostLabel(pageHost)}. Payment processors and identity providers legitimately work this way, and so does a login box whose destination has been quietly changed. The name above is the one that receives what you type — it is worth recognising before typing it.`
-            : `This form submits to ${hostLabel(host)} rather than back to ${hostLabel(pageHost)}. Embedded newsletter, search and analytics forms normally do this; it is listed so the destination is visible rather than assumed.`,
-          evidence: [`${form.label} → ${destination}`, `Asks for: ${asksFor}`],
+            ? `This form submits to ${hostLabel(host)}, which is not ${hostLabel(context.host)}. Payment processors and identity providers legitimately work this way, and so does a login box whose destination has been quietly changed. The name above is the one that receives what you type — worth recognising before typing it. It is also only the first hop: whatever receives the data can pass it on anywhere, and where it finally rests is not written in the page.`
+            : `This form submits to ${hostLabel(host)} rather than back to ${hostLabel(context.host)}. Embedded newsletter, search and analytics forms normally do this; it is listed so the destination is visible rather than assumed. That address is the first hop, not necessarily the last — whoever receives the data can forward it somewhere this panel cannot see.`,
+          evidence: [`${form.label} → ${destination}`, `Asks for: ${asksFor}`, ...frameEvidence],
         });
       }
     }
   }
 
-  if (signals.looseSensitiveFields.length > 0) {
+  if (looseEntries.length > 0) {
     findings.push({
       kind: "loose_sensitive_fields",
       severity: hasHighSensitivity(looseKinds) ? "medium" : "low",
-      title: `${signals.looseSensitiveFields.length} sensitive field${signals.looseSensitiveFields.length === 1 ? "" : "s"} sit outside any form`,
+      title: `${looseEntries.length} sensitive field${looseEntries.length === 1 ? "" : "s"} sit outside any form`,
       explanation:
         "These inputs are not inside a <form>, so there is no destination written in the page at all. Script on the page decides where the value goes when you submit, and that destination cannot be read from the markup. This is ordinary for modern single-page apps and also the shape a credential skimmer takes.",
       evidence: capEvidence(
-        signals.looseSensitiveFields.map((field) => {
-          const kind = classifyField(field);
+        looseEntries.map(({ context, field, kind }) => {
           const name = field.name || field.id || field.ariaLabel || field.placeholder || "(unnamed)";
-          return `${name} — ${kind ? SENSITIVE_LABELS[kind].toLowerCase() : "unclassified"}`;
+          return inFrame(context, `${name} — ${kind ? SENSITIVE_LABELS[kind].toLowerCase() : "unclassified"}`);
         }),
         6,
       ),
@@ -479,30 +515,34 @@ export function readSecuritySignals(signals: SecuritySignals): SecurityReading {
   const blankNoOpener: string[] = [];
   const executables: string[] = [];
 
-  for (const link of signals.links) {
-    const claimed = hostFromLinkText(link.text);
-    if (claimed) {
-      const actual = link.hostname.toLowerCase();
-      const webLink = link.protocol === "http:" || link.protocol === "https:";
-      if (!webLink) {
-        mismatches.push(`“${link.text}” → ${link.href}`);
-      } else if (actual && effectiveDomain(claimed) !== effectiveDomain(actual)) {
-        mismatches.push(`“${link.text}” → ${actual}`);
+  for (const context of contexts) {
+    for (const link of context.signals.links) {
+      const claimed = hostFromLinkText(link.text);
+      if (claimed) {
+        const actual = link.hostname.toLowerCase();
+        const webLink = link.protocol === "http:" || link.protocol === "https:";
+        if (!webLink) {
+          mismatches.push(inFrame(context, `“${link.text}” → ${link.href}`));
+        } else if (actual && effectiveDomain(claimed) !== effectiveDomain(actual)) {
+          mismatches.push(inFrame(context, `“${link.text}” → ${actual}`));
+        }
       }
-    }
-    if (link.hostname && hasPunycodeLabel(link.hostname)) punycodeLinks.add(link.hostname.toLowerCase());
-    if (link.hostname && isUrlShortener(link.hostname)) shorteners.add(link.hostname.toLowerCase());
-    if (
-      link.target === "_blank" &&
-      !/\bnoopener\b|\bnoreferrer\b/i.test(link.rel) &&
-      link.hostname &&
-      effectiveDomain(link.hostname) !== pageDomain
-    ) {
-      blankNoOpener.push(link.href);
-    }
-    const path = link.href.split(/[?#]/)[0].toLowerCase();
-    if (EXECUTABLE_EXTENSIONS.some((extension) => path.endsWith(extension))) {
-      executables.push(link.download ? `${link.href} (marked as a download)` : link.href);
+      if (link.hostname && hasPunycodeLabel(link.hostname)) {
+        punycodeLinks.add(inFrame(context, describeHostname(link.hostname.toLowerCase())));
+      }
+      if (link.hostname && isUrlShortener(link.hostname)) shorteners.add(inFrame(context, link.hostname.toLowerCase()));
+      if (
+        link.target === "_blank" &&
+        !/\bnoopener\b|\bnoreferrer\b/i.test(link.rel) &&
+        link.hostname &&
+        effectiveDomain(link.hostname) !== context.domain
+      ) {
+        blankNoOpener.push(inFrame(context, link.href));
+      }
+      const path = link.href.split(/[?#]/)[0].toLowerCase();
+      if (EXECUTABLE_EXTENSIONS.some((extension) => path.endsWith(extension))) {
+        executables.push(inFrame(context, link.download ? `${link.href} (marked as a download)` : link.href));
+      }
     }
   }
 
@@ -521,9 +561,9 @@ export function readSecuritySignals(signals: SecuritySignals): SecurityReading {
     findings.push({
       kind: "punycode_host",
       severity: "medium",
-      title: `${punycodeLinks.size} link${punycodeLinks.size === 1 ? " points" : "s point"} at encoded internationalized hostnames`,
+      title: `${punycodeLinks.size} encoded internationalized hostname${punycodeLinks.size === 1 ? "" : "s"} in links on this page`,
       explanation:
-        "Hostnames beginning xn-- are written in non-Latin or accented characters and display differently from how they are stored. That is normal for much of the web, and it is also the standard way to build a name that reads like a brand it is not.",
+        "Hostnames beginning xn-- are written in non-Latin or accented characters and display differently from how they are stored. That is normal for much of the web, and it is also the standard way to build a name that reads like a brand it is not. Each line below is the stored name followed by what it draws as, with otherwise-invisible characters written out as code points — the comparison is yours to make.",
       evidence: capEvidence([...punycodeLinks], 8),
     });
   }
@@ -551,13 +591,17 @@ export function readSecuritySignals(signals: SecuritySignals): SecurityReading {
   }
 
   // ---- Third-party code ------------------------------------------------------------------------
+  // Measured against the top page's own origin: code loaded inside a third-party frame is still
+  // code running on this page, and the frame it runs in is itself one of these origins.
   const originCounts = new Map<string, { scripts: number; frames: number }>();
-  for (const source of signals.codeSources) {
-    if (!source.origin || source.origin === signals.origin) continue;
-    const entry = originCounts.get(source.origin) ?? { scripts: 0, frames: 0 };
-    if (source.kind === "script") entry.scripts += 1;
-    else entry.frames += 1;
-    originCounts.set(source.origin, entry);
+  for (const context of contexts) {
+    for (const source of context.signals.codeSources) {
+      if (!source.origin || source.origin === signals.origin) continue;
+      const entry = originCounts.get(source.origin) ?? { scripts: 0, frames: 0 };
+      if (source.kind === "script") entry.scripts += 1;
+      else entry.frames += 1;
+      originCounts.set(source.origin, entry);
+    }
   }
   if (originCounts.size > 0) {
     const listed = [...originCounts.entries()]
@@ -597,30 +641,62 @@ export function readSecuritySignals(signals: SecuritySignals): SecurityReading {
     transport,
     findings,
     asks,
-    notChecked: buildNotChecked(signals),
-    counts: { forms: signals.forms.length, links: signals.linkCount, thirdPartyOrigins: originCounts.size },
+    notChecked: buildNotChecked(signals, frames),
+    counts: {
+      forms: formEntries.length,
+      links: contexts.reduce((total, context) => total + context.signals.linkCount, 0),
+      thirdPartyOrigins: originCounts.size,
+    },
   };
 }
 
 /**
- * The panel's honesty line, assembled rather than hardcoded so it also names the limits that only
- * applied to this particular run (a truncated link list, frames that could not be opened).
+ * The panel's honesty line. Every line here has to be a limit that still holds after the code was
+ * written — a list of things nobody got round to doing is an excuse list, not a disclosure. What is
+ * left is assembled rather than hardcoded so it also names the limits of this particular run: a
+ * truncated list, a frame that returned nothing, a form aimed at a named window.
  */
-export function buildNotChecked(signals: SecuritySignals): string[] {
+export function buildNotChecked(signals: SecuritySignals, frames: readonly SecuritySignals[] = []): string[] {
+  const documents = [signals, ...frames];
+  const sum = (pick: (one: SecuritySignals) => number): number => documents.reduce((total, one) => total + pick(one), 0);
+  const any = (pick: (one: SecuritySignals) => boolean): boolean => documents.some(pick);
+
   const lines = [
-    "Who owns this domain, how old it is, or whether anyone has reported it. None of that is in the page, and nothing was asked of any service.",
-    "Whether the certificate belongs to who you expect. The browser's own padlock is the only certificate check that happened.",
     "What the page does after this snapshot. Script can add a form, change where one posts, or rewrite a link at any moment.",
-    "Where your data actually ends up. A form's action is the first hop, not the destination.",
-    "Where a link really lands. Destinations were read out of the markup; nothing was opened or followed, and no redirect was resolved.",
-    "Anything inside cross-origin frames, closed shadow roots, images, or canvas.",
-    "Whether a hostname that reads like a familiar name belongs to it. There is no brand list, no lookalike matching, and encoded names are not decoded.",
-    "Which parts of a multi-label domain are registrable. That uses a short built-in suffix list, so an unusual country domain may be compared imprecisely.",
+    "Whether a name that reads like a familiar one belongs to it. Encoded hostnames are decoded and both forms are shown, so the comparison is there to make; nothing here matches a name against a list of brands, because doing that accuses ordinary international sites of imitation.",
   ];
-  if (signals.linksTruncated) lines.push(`Links past the first ${signals.links.length} on this page — there were ${signals.linkCount} in total.`);
-  if (signals.formsTruncated) lines.push(`Forms past the first ${signals.forms.length} on this page.`);
-  if (signals.codeSourcesTruncated) lines.push("Script and frame sources past the first 300 on this page.");
-  if (signals.mixedContentTruncated) lines.push("Plain-http resources past the first 50 found.");
-  lines.push(...signals.notCollected);
+
+  if (any((one) => one.linksTruncated)) {
+    lines.push(`Links past the first ${sum((one) => one.links.length)} read on this page — there were ${sum((one) => one.linkCount)} in total.`);
+  }
+  if (any((one) => one.formsTruncated)) lines.push(`Forms past the first ${sum((one) => one.forms.length)} read on this page.`);
+  if (any((one) => one.codeSourcesTruncated)) lines.push("Script and frame sources past the first 300 in a document on this page.");
+  if (any((one) => one.mixedContentTruncated)) lines.push("Plain-http resources past the first 50 found in a document on this page.");
+
+  // Frames are read by injecting into every one of them; the ones that answer are subtracted from
+  // the ones the markup declares, and whatever is left over is named rather than assumed empty.
+  const unreadFrames = Math.max(0, sum((one) => one.frameCount) - frames.length);
+  if (unreadFrames > 0) {
+    lines.push(
+      `Inside ${unreadFrames} frame${unreadFrames === 1 ? "" : "s"} that returned nothing. Sandboxed frames and frames that had not finished loading cannot be read; only the frame's address was.`,
+    );
+  }
+
+  // The same limit hit in several documents is one line, not one line per document — the reader
+  // needs to know it applies and where, not to scroll past it repeated.
+  const reported = new Map<string, string[]>();
+  for (const document of documents) {
+    for (const line of document.notCollected) {
+      const where = document === signals ? "" : document.url;
+      reported.set(line, [...(reported.get(line) ?? []), where]);
+    }
+  }
+  for (const [line, places] of reported) {
+    const inFrames = places.filter(Boolean);
+    if (inFrames.length === 0) lines.push(line);
+    else if (inFrames.length === 1 && places.length === 1) lines.push(`${line} (in frame ${inFrames[0]})`);
+    else if (inFrames.length === places.length) lines.push(`${line} (in ${inFrames.length} frames on this page)`);
+    else lines.push(`${line} (on this page and in ${inFrames.length} frame${inFrames.length === 1 ? "" : "s"} inside it)`);
+  }
   return lines;
 }
