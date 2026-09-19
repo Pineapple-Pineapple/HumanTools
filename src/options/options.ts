@@ -24,10 +24,10 @@ saveBtn.textContent = "Save";
 saveBtn.className =
   "self-start px-3 py-1.5 bg-amber-600 hover:bg-amber-500 rounded text-neutral-950 font-medium";
 
-const status = document.createElement("p");
-status.className = "text-xs text-neutral-500 min-h-[1em]";
+const statusEl = document.createElement("p");
+statusEl.className = "text-xs text-neutral-500 min-h-[1em]";
 
-app.append(heading, note, label, saveBtn, status);
+app.append(heading, note, label, saveBtn, statusEl);
 
 chrome.storage.local.get("openrouterApiKey").then(({ openrouterApiKey }) => {
   if (openrouterApiKey) input.value = openrouterApiKey;
@@ -35,5 +35,5 @@ chrome.storage.local.get("openrouterApiKey").then(({ openrouterApiKey }) => {
 
 saveBtn.addEventListener("click", async () => {
   await chrome.storage.local.set({ openrouterApiKey: input.value.trim() });
-  status.textContent = "Saved.";
+  statusEl.textContent = "Saved.";
 });
