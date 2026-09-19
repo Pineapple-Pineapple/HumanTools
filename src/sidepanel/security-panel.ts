@@ -1,7 +1,7 @@
 import { collectSecuritySignals } from "../content/security-signals";
 import { getActiveTabId } from "../lib/active-tab";
 import { emptyFindingsMessage, findingsSummary, readSecuritySignals } from "../lib/security-heuristics";
-import type { Finding, SecurityReading, SensitiveAsk, Severity } from "../lib/security-heuristics";
+import type { Finding, SecurityReading, SecuritySignals, SensitiveAsk, Severity } from "../lib/security-heuristics";
 
 const SEVERITY_LABEL: Record<Severity, string> = {
   high: "Worth stopping for",
@@ -188,13 +188,26 @@ export function mountSecurityPanel(container: HTMLElement): void {
     status.textContent = "Reading this page…";
     try {
       const tabId = await getActiveTabId();
-      const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: collectSecuritySignals });
-      if (!result) {
+      // allFrames: true runs the collector in every frame the extension can reach, including
+      // cross-origin ones — the host permissions already cover them. Each frame answers separately
+      // and stays separate: the top document is frame 0, everything else is attributed to its own
+      // address so a form inside a third-party frame is never read as the page's own.
+      const injected = await chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        func: collectSecuritySignals,
+      });
+      const collected = injected.filter((entry): entry is typeof entry & { result: SecuritySignals } => Boolean(entry.result));
+      const top = collected.find((entry) => entry.frameId === 0) ?? collected[0];
+      if (!top) {
         status.textContent = "Nothing came back from this page.";
         return;
       }
-      render(readSecuritySignals(result));
-      status.textContent = `Read at ${new Date().toLocaleTimeString()}. This is a snapshot; the page can change after it.`;
+      const subframes = collected.filter((entry) => entry !== top).map((entry) => entry.result);
+      render(readSecuritySignals(top.result, subframes));
+      const frameNote = subframes.length
+        ? ` Read the top page and ${subframes.length} frame${subframes.length === 1 ? "" : "s"} inside it.`
+        : "";
+      status.textContent = `Read at ${new Date().toLocaleTimeString()}.${frameNote} This is a snapshot; the page can change after it.`;
     } catch (err) {
       status.textContent = pageAccessError(err);
     } finally {

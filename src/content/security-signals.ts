@@ -7,19 +7,47 @@ import type { FieldSignal, FormSignal, LinkSignal, SecuritySignals } from "../li
  * injection time and silently return nothing. Only `import type` is safe (erased at compile time)
  * and literals declared inside the function body itself. See extractPageBlocks in ./functions.ts.
  *
+ * It is injected with allFrames: true, so this runs once per frame and returns one of these per
+ * frame. Each copy describes its own document only — its own url, origin and hostname — and the
+ * side panel keeps them apart so a form inside a payment frame is reported as being in that frame.
+ *
  * It reads structure only. No field values are read, ever — not even to classify a field, which
  * happens later from name, type and autocomplete metadata in src/lib/security-heuristics.ts.
  */
 export function collectSecuritySignals(): SecuritySignals {
-  const MAX_LINKS = 600;
-  const MAX_FORMS = 40;
+  // A ceiling no real page reaches, kept only so a generated page cannot hang the walk. The checks
+  // per link are a few string comparisons, so there is no reason to stop at a few hundred.
+  const MAX_LINKS = 20000;
+  const MAX_FORMS = 200;
   const MAX_FIELDS = 40;
   const MAX_CODE_SOURCES = 300;
   const MAX_MIXED = 50;
+  const MAX_ROOTS = 5000;
   const TEXT_CAP = 120;
 
   const pageUrl = location.href;
   const pageOrigin = location.origin;
+
+  // Every open shadow root in this document, gathered once. A closed root returns null from
+  // element.shadowRoot and is unreachable by design; there is nothing to do about that here.
+  const roots: (Document | ShadowRoot)[] = [document];
+  for (let i = 0; i < roots.length && roots.length < MAX_ROOTS; i += 1) {
+    for (const el of Array.from(roots[i].querySelectorAll("*"))) {
+      const shadow = el.shadowRoot;
+      if (shadow) {
+        roots.push(shadow);
+        if (roots.length >= MAX_ROOTS) break;
+      }
+    }
+  }
+
+  const queryAll = (selector: string): Element[] => {
+    const found: Element[] = [];
+    for (const root of roots) {
+      for (const el of Array.from(root.querySelectorAll(selector))) found.push(el);
+    }
+    return found;
+  };
 
   const absolute = (value: string | null): string => {
     if (!value) return "";
@@ -71,6 +99,21 @@ export function collectSecuritySignals(): SecuritySignals {
     };
   };
 
+  // The form a field belongs to, crossing shadow boundaries on the way up. element.form already
+  // handles the form="id" attribute but stops at a shadow root, so a field inside a component
+  // inside a form would otherwise be reported as belonging to no form at all.
+  const ownerForm = (el: Element): HTMLFormElement | null => {
+    const own = (el as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).form;
+    if (own) return own;
+    let node: Node | null = el.parentNode;
+    while (node) {
+      if ((node as Element).tagName === "FORM") return node as HTMLFormElement;
+      const host = node.nodeType === 11 ? (node as ShadowRoot).host : null;
+      node = host ?? node.parentNode;
+    }
+    return null;
+  };
+
   const labelForForm = (form: HTMLFormElement, index: number): string => {
     const submit = form.querySelector("button[type=submit], input[type=submit], button:not([type])");
     const submitText = submit
@@ -83,14 +126,27 @@ export function collectSecuritySignals(): SecuritySignals {
   };
 
   // ---- Forms -----------------------------------------------------------------------------------
-  const allForms = Array.from(document.querySelectorAll("form"));
+  const allForms = queryAll("form") as HTMLFormElement[];
+  const fieldsByForm = new Map<Element, Element[]>();
+  const orphanFields: Element[] = [];
+  for (const el of queryAll("input, select, textarea")) {
+    const owner = ownerForm(el);
+    if (!owner) {
+      orphanFields.push(el);
+      continue;
+    }
+    const existing = fieldsByForm.get(owner);
+    if (existing) existing.push(el);
+    else fieldsByForm.set(owner, [el]);
+  }
+
   const forms: FormSignal[] = [];
   allForms.slice(0, MAX_FORMS).forEach((form, index) => {
     const actionRaw = form.getAttribute("action");
     // An absent action means the form posts back to the page's own URL, which is what matters
     // for the http and off-site checks, so resolve it that way rather than leaving it blank.
     const action = actionRaw === null ? absolute(pageUrl) : absolute(actionRaw);
-    const fieldEls = Array.from(form.querySelectorAll("input, select, textarea"));
+    const fieldEls = fieldsByForm.get(form) ?? [];
     const formActions = Array.from(form.querySelectorAll("[formaction]"))
       .map((el) => absolute(el.getAttribute("formaction")))
       .filter((href): href is string => Boolean(href));
@@ -111,14 +167,13 @@ export function collectSecuritySignals(): SecuritySignals {
   const looseSensitiveFields: FieldSignal[] = [];
   const LOOSE_SELECTOR =
     "input[type=password], input[autocomplete*='cc-'], input[name*='card' i], input[name*='cvv' i], input[name*='cvc' i], input[id*='password' i]";
-  for (const el of Array.from(document.querySelectorAll(LOOSE_SELECTOR))) {
-    if (el.closest("form")) continue;
+  for (const el of orphanFields) {
     if (looseSensitiveFields.length >= MAX_FIELDS) break;
-    looseSensitiveFields.push(readField(el));
+    if (el.matches(LOOSE_SELECTOR)) looseSensitiveFields.push(readField(el));
   }
 
   // ---- Links -----------------------------------------------------------------------------------
-  const anchors = Array.from(document.querySelectorAll("a[href]"));
+  const anchors = queryAll("a[href]");
   const links: LinkSignal[] = anchors.slice(0, MAX_LINKS).map((a) => {
     const parsed = anyUrl(a.getAttribute("href"));
     return {
@@ -134,7 +189,7 @@ export function collectSecuritySignals(): SecuritySignals {
 
   // ---- Code sources and mixed content ----------------------------------------------------------
   const codeSources: { kind: "script" | "iframe"; url: string; origin: string }[] = [];
-  for (const el of Array.from(document.querySelectorAll("script[src], iframe[src]"))) {
+  for (const el of queryAll("script[src], iframe[src]")) {
     if (codeSources.length >= MAX_CODE_SOURCES) break;
     const href = absolute(el.getAttribute("src"));
     if (!href) continue;
@@ -153,7 +208,7 @@ export function collectSecuritySignals(): SecuritySignals {
       { selector: "object[data]", attribute: "data", kind: "object" },
     ];
     for (const group of groups) {
-      for (const el of Array.from(document.querySelectorAll(group.selector))) {
+      for (const el of queryAll(group.selector)) {
         if (mixedContent.length >= MAX_MIXED) break;
         const raw = el.getAttribute(group.attribute);
         if (!raw) continue;
@@ -166,18 +221,11 @@ export function collectSecuritySignals(): SecuritySignals {
   }
 
   // ---- What this walker itself could not see ---------------------------------------------------
+  // Frames are counted, not opened: the same collector is injected into every frame in the tab, and
+  // the panel subtracts the frames that answered from this count to say what was left unread.
+  const frameCount = queryAll("iframe, frame").length;
   const notCollected: string[] = [];
-  const frames = Array.from(document.querySelectorAll("iframe"));
-  const crossOriginFrames = frames.filter((frame) => {
-    const href = absolute(frame.getAttribute("src"));
-    return href !== "" && originOf(href) !== pageOrigin;
-  }).length;
-  if (crossOriginFrames > 0) {
-    notCollected.push(
-      `The contents of ${crossOriginFrames} frame${crossOriginFrames === 1 ? "" : "s"} from other origins. Forms and links inside them were not read; only the frame's address was.`,
-    );
-  }
-  if (document.querySelector("form[target]")) {
+  if (queryAll("form[target]").length > 0) {
     notCollected.push("Where a form that targets a frame or a named window ends up after it is submitted.");
   }
 
@@ -197,6 +245,7 @@ export function collectSecuritySignals(): SecuritySignals {
     codeSourcesTruncated: codeSources.length >= MAX_CODE_SOURCES,
     mixedContent,
     mixedContentTruncated: mixedContent.length >= MAX_MIXED,
+    frameCount,
     notCollected,
   };
 }

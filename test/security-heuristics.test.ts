@@ -60,6 +60,7 @@ function signals(partial: Partial<SecuritySignals> = {}): SecuritySignals {
     codeSourcesTruncated: false,
     mixedContent: [],
     mixedContentTruncated: false,
+    frameCount: 0,
     notCollected: [],
     ...partial,
   };
@@ -87,8 +88,20 @@ describe("a page with nothing wrong", () => {
   });
 
   it("still says what it could not check", () => {
-    expect(reading.notChecked.length).toBeGreaterThan(4);
-    expect(reading.notChecked.join(" ")).toContain("certificate");
+    expect(reading.notChecked.length).toBeGreaterThan(0);
+    expect(reading.notChecked.join(" ")).toContain("after this snapshot");
+  });
+
+  /**
+   * The list is a disclosure, not a backlog. A line only belongs in it if it is still true after
+   * the code was written — these were all removed by doing the work, or because no browser API
+   * exists and naming the gap only advertises it.
+   */
+  it("does not keep a limitation that no longer holds", () => {
+    const text = reading.notChecked.join(" ").toLowerCase();
+    for (const gone of ["certificate", "padlock", "cross-origin frame", "shadow root", "canvas", "short built-in suffix", "not decoded", "who owns this domain"]) {
+      expect(text).not.toContain(gone);
+    }
   });
 
   it("produces no aggregate score that could be read as a verdict", () => {
@@ -220,6 +233,25 @@ describe("link deception", () => {
     expect(hostFromLinkText("https://paypal.com/login")).toBe("paypal.com");
   });
 
+  it("shows an encoded hostname beside what it draws as, and judges neither", () => {
+    const reading = readSecuritySignals(
+      signals({ url: "https://xn--pypal-4ve.com/", origin: "https://xn--pypal-4ve.com", hostname: "xn--pypal-4ve.com" }),
+    );
+    const finding = reading.findings.find((f) => f.kind === "punycode_host");
+    expect(finding?.evidence).toEqual(["xn--pypal-4ve.com (shown as p\u0430ypal.com)"]);
+    expect(finding?.title).not.toMatch(/paypal/i);
+    expect(finding?.explanation).not.toMatch(/paypal/i);
+  });
+
+  it("decodes an encoded hostname a link points at", () => {
+    const reading = readSecuritySignals(
+      signals({ links: [link({ href: "https://xn--80ak6aa92e.com/", hostname: "xn--80ak6aa92e.com" })], linkCount: 1 }),
+    );
+    expect(reading.findings.find((f) => f.kind === "punycode_host")?.evidence).toEqual([
+      "xn--80ak6aa92e.com (shown as \u0430\u0440\u0440\u04cf\u0435.com)",
+    ]);
+  });
+
   it("names punycode hostnames and shorteners without resolving them", () => {
     const reading = readSecuritySignals(
       signals({
@@ -256,6 +288,73 @@ describe("link deception", () => {
     );
     const finding = reading.findings.find((f) => f.kind === "blank_target_no_noopener");
     expect(finding?.evidence).toEqual(["https://other.net/x"]);
+  });
+});
+
+describe("frames", () => {
+  const paymentFrame = (partial: Partial<SecuritySignals> = {}): SecuritySignals =>
+    signals({
+      url: "https://pay.example.net/checkout",
+      origin: "https://pay.example.net",
+      hostname: "pay.example.net",
+      ...partial,
+    });
+
+  it("says a form is inside a frame rather than implying the page wrote it", () => {
+    const reading = readSecuritySignals(signals({ frameCount: 1 }), [
+      paymentFrame({
+        forms: [
+          form({
+            label: "Form “Pay”",
+            action: "https://collector.example.org/p",
+            fields: [field({ autocomplete: "cc-number", name: "cardnumber" })],
+          }),
+        ],
+      }),
+    ]);
+    const finding = reading.findings.find((f) => f.kind === "form_posts_off_site");
+    expect(finding?.title).toContain("inside a frame from pay.example.net");
+    expect(finding?.evidence).toContain("In frame: https://pay.example.net/checkout");
+    expect(reading.asks[0].formLabel).toContain("in a frame from pay.example.net");
+  });
+
+  it("reads a frame's form against the frame's own origin, not the page's", () => {
+    const reading = readSecuritySignals(signals({ frameCount: 1 }), [
+      paymentFrame({ forms: [form({ action: "https://pay.example.net/charge", fields: [field({ type: "password" })] })] }),
+    ]);
+    expect(reading.findings.map((f) => f.kind)).not.toContain("form_posts_off_site");
+    expect(reading.asks[0].destination).toBe("pay.example.net");
+  });
+
+  it("attributes a link and a plain-http resource to the frame they were found in", () => {
+    const reading = readSecuritySignals(signals({ frameCount: 1 }), [
+      paymentFrame({
+        links: [link({ href: "https://bit.ly/x", hostname: "bit.ly" })],
+        linkCount: 1,
+        mixedContent: [{ kind: "image", url: "http://img.example/a.png" }],
+      }),
+    ]);
+    expect(reading.findings.find((f) => f.kind === "shortened_link")?.evidence).toEqual([
+      "bit.ly — in frame https://pay.example.net/checkout",
+    ]);
+    expect(reading.findings.find((f) => f.kind === "mixed_content")?.evidence).toEqual([
+      "image: http://img.example/a.png — in frame https://pay.example.net/checkout",
+    ]);
+  });
+
+  it("counts forms and links across every frame it reached", () => {
+    const reading = readSecuritySignals(signals({ frameCount: 1, forms: [form()], linkCount: 3 }), [
+      paymentFrame({ forms: [form(), form()], linkCount: 4 }),
+    ]);
+    expect(reading.counts.forms).toBe(3);
+    expect(reading.counts.links).toBe(7);
+  });
+
+  it("names the frames that returned nothing, and stays quiet when they all answered", () => {
+    const some = buildNotChecked(signals({ frameCount: 3 }), [paymentFrame()]);
+    expect(some.some((line) => line.includes("2 frames that returned nothing"))).toBe(true);
+    const all = buildNotChecked(signals({ frameCount: 1 }), [paymentFrame()]);
+    expect(all.some((line) => line.includes("returned nothing"))).toBe(false);
   });
 });
 
@@ -366,5 +465,10 @@ describe("helpers", () => {
     const lines = buildNotChecked(signals({ linksTruncated: true, linkCount: 1200, links: [link()], notCollected: ["A frame."] }));
     expect(lines.some((line) => line.includes("1200"))).toBe(true);
     expect(lines).toContain("A frame.");
+  });
+
+  it("says nothing about truncation when nothing was truncated", () => {
+    const lines = buildNotChecked(signals({ linkCount: 4000, links: Array.from({ length: 4000 }, () => link()) }));
+    expect(lines.some((line) => line.includes("Links past"))).toBe(false);
   });
 });
