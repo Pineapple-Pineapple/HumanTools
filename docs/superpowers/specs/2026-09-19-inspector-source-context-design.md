@@ -24,12 +24,20 @@ Only `external_verified` sources are returned through the existing verified-sour
 
 The first non-factual publisher is `theonion.com`. The list is an explicit annotation layer, not the system's primary trust rule: URL distinction is always required for external verification.
 
+## Source-quality disclosure
+
+Every eligible external source has a separate quality disclosure. `institutional_signal` applies to the existing government, regulator, DOI, academic, and named scientific-publication domain signals. All other external sources are `credibility_unassessed`: the exact quote was found on a distinct page, but the product has not established that publisher's reliability. Known non-factual sources are context-only and receive their existing warning.
+
+The UI must never call a source generally “trustworthy.” A quote match proves only that a distinct page contains the text; source-quality labels tell the reader whether the product has a limited institutional signal or no reliability assessment.
+
 ## Inspector Presentation
 
 Each claim has two sections:
 
 1. **Page context — not verification** shows a same-page exact match and explains that it cannot support the page's own claim.
 2. **External verification** shows only eligible external sources, each marked “Exact quote verified on external source.”
+
+Each external row also says either “Institutional/public-record signal” or “Credibility not established.”
 
 Known non-factual matches appear in the page-context section with “Known satire/non-factual publisher — not evidence for this claim.” When no eligible external source exists, the external section says “No external verification found.” The claim remains Unverified; absence of evidence is not evidence of falsity.
 

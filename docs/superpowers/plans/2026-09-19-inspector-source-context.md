@@ -12,6 +12,7 @@
 
 - A canonical URL equal to the inspected page is never external verification, including after a redirect.
 - `theonion.com` is the initial known non-factual publisher; its role is annotation, never the sole trust rule.
+- Eligible external sources disclose either an institutional/public-record signal or credibility unassessed; neither label is a general trust verdict.
 - Context reasons are additive: a same-page Onion article explains both circularity and non-factual status.
 - Only `external_verified` sources are indexed in `human-tools-sources`.
 - No credential values, full fetched page content, or new external services are introduced.
@@ -27,7 +28,7 @@
 - Modify: `worker/test/source-tracer-agent.test.ts`
 
 **Interfaces:**
-- Produces `SourceContextReason = "page_context" | "non_factual_context"` and `classifySourceContext(fetchedUrl, inspectedUrl): SourceContextReason[]`.
+- Produces `SourceContextReason = "page_context" | "non_factual_context"`, `SourceQuality = "institutional_signal" | "credibility_unassessed"`, and `classifySourceContext(fetchedUrl, inspectedUrl): SourceContextReason[]`.
 - Extends `SourceTraceOutcome` with `contexts: ContextSource[]`; `sources` remains eligible external sources only.
 
 - [ ] **Step 1: Write the failing classification tests**
@@ -47,6 +48,11 @@ it("adds the non-factual warning for The Onion", async () => {
     "https://theonion.com/story",
     "https://reader.test/article",
   )).toEqual(["non_factual_context"]);
+});
+
+it("marks an ordinary external domain as credibility unassessed", async () => {
+  const module = await loadCandidates();
+  expect(module?.sourceQuality("https://example.net/report")).toBe("credibility_unassessed");
 });
 ```
 
@@ -79,7 +85,7 @@ export function classifySourceContext(fetchedUrl: string, inspectedUrl: string):
 }
 ```
 
-In `worker/src/source-tracer-agent.ts`, define `ContextSource` with the existing source metadata, excerpt, `contextReasons`, and `verification: "context"`. After `verifySourceExcerpt` succeeds, call `classifySourceContext(fetched.url, request.page.url)`. Push nonempty-reason results into `contexts`, emit a skipped verifier event with `"Page context only."`, `"Known non-factual publisher."`, or both joined by a space, and return `null` from the eligible-source branch. Only sources with no reasons continue to `sources` and the existing index call.
+Export `sourceQuality(url)` from `worker/src/source-candidates.ts`. It returns `institutional_signal` when the existing primary-source score is positive and `credibility_unassessed` otherwise. In `worker/src/source-tracer-agent.ts`, define `ContextSource` with the existing source metadata, excerpt, `contextReasons`, and `verification: "context"`. After `verifySourceExcerpt` succeeds, call `classifySourceContext(fetched.url, request.page.url)`. Push nonempty-reason results into `contexts`, emit a skipped verifier event with `"Page context only."`, `"Known non-factual publisher."`, or both joined by a space, and return `null` from the eligible-source branch. Add `sourceQuality` to eligible sources only; only sources with no context reasons continue to the index call.
 
 - [ ] **Step 4: Run the Worker tests**
 
@@ -104,7 +110,7 @@ git commit -m "feat: classify source context separately"
 - Modify: `test/source-tracer-client.test.ts`
 
 **Interfaces:**
-- `SOURCE_TRACE_DONE` carries `{ sources: VerifiedSource[]; contexts: ContextSource[] }`.
+- `SOURCE_TRACE_DONE` carries `{ sources: VerifiedSource[]; contexts: ContextSource[] }`; each verified source has `sourceQuality`.
 - `SourceTraceResult` exposes both arrays.
 - `INSPECT_SOURCES` carries `sourcesByQuote` and `contextsByQuote` keyed by verified quote.
 
@@ -142,7 +148,7 @@ Expected: FAIL because `SourceTraceResult` does not expose `contexts`.
 
 - [ ] **Step 3: Implement strict parsing and message propagation**
 
-Add exported client-side `SourceContextReason = "page_context" | "non_factual_context"` and `ContextSource` types, plus a parser that requires HTTPS URL, title, excerpt, publisher, ISO-like timestamp string, `verification: "context"`, and a nonempty subset of those reasons.
+Add exported client-side `SourceContextReason = "page_context" | "non_factual_context"`, `SourceQuality = "institutional_signal" | "credibility_unassessed"`, and `ContextSource` types. Require a verified source's valid `sourceQuality`; require HTTPS URL, title, excerpt, publisher, ISO-like timestamp string, `verification: "context"`, and a nonempty subset of context reasons for context parsing.
 
 Change `requestSourceTrace` to return `Promise<SourceTraceResult>` rather than only `VerifiedSource[]`. In `worker/src/source-tracer-do.ts`, append `contexts: outcome.contexts` to `SOURCE_TRACE_DONE`. Update `InspectSources`, `runSourceTracer`, and the cache so each claim stores both `{ sources, contexts }`; an invalid or missing Worker record becomes no evidence, never a positive label.
 
@@ -193,7 +199,7 @@ Expected: FAIL because `sourceContextMessage` is not exported.
 
 - [ ] **Step 3: Implement the presentation split**
 
-Replace every user-facing “Independent verification” label with **“External verification”**. Initially render “Checking external sources…”. Render a **“Page context — not verification”** sub-section only if context records exist; include each source link, the exact excerpt, and `sourceContextMessage(context.contextReasons)`. The external section renders only `VerifiedSource[]`, labels each row “Exact quote verified on external source”, and falls back to “No external verification found.”
+Replace every user-facing “Independent verification” label with **“External verification”**. Initially render “Checking external sources…”. Render a **“Page context — not verification”** sub-section only if context records exist; include each source link, the exact excerpt, and `sourceContextMessage(context.contextReasons)`. The external section renders only `VerifiedSource[]`, labels each row “Exact quote verified on external source”, and adds “Institutional/public-record signal” for `institutional_signal` or “Credibility not established” for `credibility_unassessed`. It falls back to “No external verification found.”
 
 Update the footer to say: “A matching source is evidence only when it is a distinct eligible external page. Text found on this page is context, not verification. No result is not proof that a claim is false.” Update the README with the same distinction and note that The Onion is initially annotated as known non-factual context.
 
