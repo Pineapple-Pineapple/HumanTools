@@ -1,2 +1,6 @@
+import { renderTabs } from "./tabs";
+import { renderAccessibilityPanel } from "./accessibility-panel";
+
 const app = document.getElementById("app")!;
-app.textContent = "Human Tools";
+renderTabs(app);
+renderAccessibilityPanel(app);
