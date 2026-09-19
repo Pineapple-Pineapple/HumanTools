@@ -178,9 +178,22 @@ export function captureInspectTarget(): InspectTarget | null {
   const MAX_LINKS = 30;
   const BLOCK_SELECTOR = "p, li, blockquote, dd, dt, td, th, figcaption, h1, h2, h3, h4, h5, h6, pre";
 
+  const BADGE_CLASS = "__ht-claim-badge";
+
+  // Claim badges are our own spans living inside the page's text, so their digits land in both
+  // Selection.toString() and Element.textContent. Capturing them would put text in the passage
+  // that markClaims later strips, leaving every quote unfindable and every badge unlinked.
+  const textWithoutBadges = (node: Node): string => {
+    const clone = node.cloneNode(true) as Element | DocumentFragment;
+    if (clone instanceof Element || clone instanceof DocumentFragment) {
+      clone.querySelectorAll?.(`.${BADGE_CLASS}`).forEach((b) => b.remove());
+    }
+    return (clone.textContent ?? "").replace(/\s+/g, " ").trim();
+  };
+
   const selection = window.getSelection();
   if (!selection || selection.rangeCount === 0) return null;
-  const text = selection.toString().replace(/\s+/g, " ").trim();
+  const text = textWithoutBadges(selection.getRangeAt(0).cloneContents());
   if (text.length < MIN_CHARS) return null;
 
   const range = selection.getRangeAt(0);
@@ -198,7 +211,7 @@ export function captureInspectTarget(): InspectTarget | null {
       blockId = `ht-i${Math.random().toString(36).slice(2, 10)}`;
       scope.setAttribute("data-ht-inspect-id", blockId);
     }
-    const blockText = (scope.textContent ?? "").replace(/\s+/g, " ").trim();
+    const blockText = textWithoutBadges(scope);
     if (blockText.length >= text.length && blockText.length <= MAX_CHARS * 2) paragraph = blockText;
   }
 
