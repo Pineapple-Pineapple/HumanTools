@@ -1,6 +1,23 @@
 @import "tailwindcss";
+@import "katex/dist/katex.min.css";
+
+html,
+body,
+#app {
+  height: 100%;
+}
 
 html,
 body {
   overflow-x: hidden;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+}
+
+/* KaTeX ships light-theme colors; keep math legible on the panel's dark background. */
+.katex {
+  color: inherit;
 }

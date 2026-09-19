@@ -14,6 +14,8 @@ export function extractPageBlocks(): PageModel {
 
   const paragraphs = Array.from(document.querySelectorAll("p"));
   const blocks: { id: string; text: string }[] = [];
+  const linkMap = new Map<string, string>();
+  const pageUrl = location.href.split("#")[0];
 
   paragraphs.forEach((el, index) => {
     const text = el.textContent?.trim() ?? "";
@@ -23,9 +25,17 @@ export function extractPageBlocks(): PageModel {
     const id = `ht-b${index}`;
     el.setAttribute("data-ht-block-id", id);
     blocks.push({ id, text });
+
+    el.querySelectorAll("a[href]").forEach((a) => {
+      const href = (a as HTMLAnchorElement).href;
+      const linkText = a.textContent?.trim();
+      if (!href || !linkText || href.split("#")[0] === pageUrl) return;
+      if (!linkMap.has(href)) linkMap.set(href, linkText);
+    });
   });
 
-  return { url: location.href, blocks };
+  const links = Array.from(linkMap, ([href, text]) => ({ href, text }));
+  return { url: location.href, blocks, links };
 }
 
 /** Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. */
@@ -47,6 +57,73 @@ export function applyRewrites(patches: { id: string; text: string }[]): void {
     el.textContent = patch.text;
     el.classList.add(REWRITTEN_CLASS);
   }
+}
+
+/** Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. */
+export function applyBullets(patches: { id: string; bullets: string[] }[]): void {
+  const REWRITTEN_CLASS = "__ht-rewritten";
+  const STYLE_ID = "__ht-style";
+
+  if (!document.getElementById(STYLE_ID)) {
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = `.${REWRITTEN_CLASS} { outline: 2px dashed #f59e0b; outline-offset: 2px; background: rgba(245,158,11,.08); }`;
+    document.head.appendChild(style);
+  }
+
+  for (const patch of patches) {
+    const el = document.querySelector(`[data-ht-block-id="${patch.id}"]`);
+    if (!(el instanceof HTMLElement)) continue;
+    if (!el.title) el.title = el.textContent ?? "";
+
+    const list = document.createElement("ul");
+    list.style.margin = "0";
+    list.style.paddingLeft = "1.25em";
+    for (const bullet of patch.bullets) {
+      const li = document.createElement("li");
+      li.textContent = bullet;
+      list.appendChild(li);
+    }
+    el.replaceChildren(list);
+    el.classList.add(REWRITTEN_CLASS);
+  }
+}
+
+/**
+ * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. Finds the
+ * element (among ones extraction tagged) whose text contains `quote`, scrolls it into view, and
+ * flashes it briefly. Returns whether a match was found.
+ */
+export function scrollToAndHighlight(quote: string): boolean {
+  const FLASH_CLASS = "__ht-flash";
+  const STYLE_ID = "__ht-flash-style";
+
+  if (!document.getElementById(STYLE_ID)) {
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent =
+      `.${FLASH_CLASS} { animation: __ht-flash-anim 1.6s ease-out; } ` +
+      `@keyframes __ht-flash-anim { 0% { background: rgba(245,158,11,.5); } 100% { background: transparent; } }`;
+    document.head.appendChild(style);
+  }
+
+  const needle = quote.trim().toLowerCase();
+  if (!needle) return false;
+
+  const candidates = document.querySelectorAll("[data-ht-block-id]");
+  for (const el of candidates) {
+    if (!(el instanceof HTMLElement)) continue;
+    if (!(el.textContent ?? "").toLowerCase().includes(needle)) continue;
+
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.remove(FLASH_CLASS);
+    void el.offsetWidth; // force reflow so the animation restarts on repeat clicks
+    el.classList.add(FLASH_CLASS);
+    setTimeout(() => el.classList.remove(FLASH_CLASS), 1700);
+    return true;
+  }
+
+  return false;
 }
 
 /** Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. */

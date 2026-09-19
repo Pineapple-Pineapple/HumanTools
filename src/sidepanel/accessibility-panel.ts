@@ -1,7 +1,9 @@
 import { computeFleschKincaidGrade } from "../lib/flesch-kincaid";
-import { extractPageBlocks, applyRewrites, restoreOriginal } from "../content/functions";
+import { extractPageBlocks, applyRewrites, applyBullets, restoreOriginal } from "../content/functions";
 import { startRewrite } from "../lib/messages";
-import type { Grade, PageModel } from "../lib/types";
+import { getActiveTabId } from "../lib/active-tab";
+import { hasApiKey } from "../lib/provider";
+import type { Grade, PageModel, RewriteFormat } from "../lib/types";
 
 const GRADE_STEPS: Grade[] = [6, 8, 10, 12];
 const DEFAULT_GRADE: Grade = 8;
@@ -12,6 +14,7 @@ interface AccessibilityPanelEls {
   gradeReadout: HTMLElement;
   gradeSlider: HTMLInputElement;
   gradeValue: HTMLElement;
+  bulletsCheckbox: HTMLInputElement;
   rewriteBtn: HTMLButtonElement;
   restoreBtn: HTMLButtonElement;
   status: HTMLElement;
@@ -74,6 +77,15 @@ function renderAccessibilityPanel(container: HTMLElement): AccessibilityPanelEls
 
   gradeRow.append(gradeLabelRow, gradeSlider, ticksRow);
 
+  const bulletsRow = document.createElement("label");
+  bulletsRow.className = "flex items-center gap-2 text-neutral-300";
+  const bulletsCheckbox = document.createElement("input");
+  bulletsCheckbox.type = "checkbox";
+  bulletsCheckbox.disabled = true;
+  const bulletsLabel = document.createElement("span");
+  bulletsLabel.textContent = "Convert to bullet points";
+  bulletsRow.append(bulletsCheckbox, bulletsLabel);
+
   const actionRow = document.createElement("div");
   actionRow.className = "flex gap-2";
   const rewriteBtn = document.createElement("button");
@@ -96,26 +108,22 @@ function renderAccessibilityPanel(container: HTMLElement): AccessibilityPanelEls
   optionsLink.textContent = "Set API key";
   optionsLink.className = "self-start text-xs text-amber-500 hover:underline";
 
-  rewriteGroup.append(gradeRow, actionRow, status, optionsLink);
+  rewriteGroup.append(gradeRow, bulletsRow, actionRow, status, optionsLink);
   root.append(heading, analyzeGroup, rewriteGroup);
   container.appendChild(root);
 
-  return { root, analyzeBtn, gradeReadout, gradeSlider, gradeValue, rewriteBtn, restoreBtn, status, optionsLink };
-}
-
-async function getActiveTabId(): Promise<number> {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) throw new Error("No active tab.");
-  return tab.id;
-}
-
-async function hasApiKey(): Promise<boolean> {
-  const { provider, openaiApiKey, openrouterApiKey } = await chrome.storage.local.get([
-    "provider",
-    "openaiApiKey",
-    "openrouterApiKey",
-  ]);
-  return Boolean(provider === "openrouter" ? openrouterApiKey : openaiApiKey);
+  return {
+    root,
+    analyzeBtn,
+    gradeReadout,
+    gradeSlider,
+    gradeValue,
+    bulletsCheckbox,
+    rewriteBtn,
+    restoreBtn,
+    status,
+    optionsLink,
+  };
 }
 
 export function mountAccessibilityPanel(container: HTMLElement): void {
@@ -158,6 +166,7 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
       const grade = computeFleschKincaidGrade(pageModel.blocks.map((b) => b.text).join(" "));
       els.gradeReadout.textContent = `Reading grade: ${grade}`;
       els.gradeSlider.disabled = false;
+      els.bulletsCheckbox.disabled = false;
 
       const keyPresent = await hasApiKey();
       els.rewriteBtn.disabled = !keyPresent;
@@ -175,21 +184,35 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
   els.rewriteBtn.addEventListener("click", async () => {
     if (!pageModel || pageModel.blocks.length === 0) return;
     const grade = Number(els.gradeSlider.value) as Grade;
+    const format: RewriteFormat = els.bulletsCheckbox.checked ? "bullets" : "prose";
     const tabId = await getActiveTabId();
 
     els.status.textContent = `Rewriting… 0/${pageModel.blocks.length} paragraphs`;
     els.rewriteBtn.disabled = true;
     els.gradeSlider.disabled = true;
+    els.bulletsCheckbox.disabled = true;
     let restoreShown = false;
 
-    startRewrite(pageModel.blocks, grade, {
+    startRewrite(pageModel.blocks, grade, format, {
       onProgress: (msg) => {
-        chrome.scripting.executeScript({ target: { tabId }, func: applyRewrites, args: [[msg.patch]] });
-        els.status.textContent = `Rewriting… ${msg.done}/${msg.total} paragraphs`;
+        if (format === "bullets" && msg.patch.bullets) {
+          chrome.scripting.executeScript({
+            target: { tabId },
+            func: applyBullets,
+            args: [[{ id: msg.patch.id, bullets: msg.patch.bullets }]],
+          });
+        } else if (msg.patch.text !== undefined) {
+          chrome.scripting.executeScript({
+            target: { tabId },
+            func: applyRewrites,
+            args: [[{ id: msg.patch.id, text: msg.patch.text }]],
+          });
+        }
         if (!restoreShown) {
           els.restoreBtn.hidden = false;
           restoreShown = true;
         }
+        els.status.textContent = `Rewriting… ${msg.done}/${msg.total} paragraphs`;
       },
       onParagraphError: (msg) => {
         els.status.textContent = `Rewriting… ${msg.done}/${msg.total} paragraphs`;
@@ -201,11 +224,13 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
             : `Rewrote ${msg.succeeded} paragraphs at grade ${grade}. Hover a paragraph to see the original.`;
         els.rewriteBtn.disabled = false;
         els.gradeSlider.disabled = false;
+        els.bulletsCheckbox.disabled = false;
       },
       onFatalError: (msg) => {
         els.status.textContent = msg.message;
         els.rewriteBtn.disabled = false;
         els.gradeSlider.disabled = false;
+        els.bulletsCheckbox.disabled = false;
       },
     });
   });
