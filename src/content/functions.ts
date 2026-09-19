@@ -24,3 +24,35 @@ export function extractPageBlocks(): PageModel {
 
   return { url: location.href, blocks };
 }
+
+const REWRITTEN_CLASS = "__ht-rewritten";
+const STYLE_ID = "__ht-style";
+
+/** Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. */
+export function applyRewrites(patches: { id: string; text: string }[]): void {
+  if (!document.getElementById(STYLE_ID)) {
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = `.${REWRITTEN_CLASS} { outline: 2px dashed #f59e0b; outline-offset: 2px; background: rgba(245,158,11,.08); }`;
+    document.head.appendChild(style);
+  }
+
+  for (const patch of patches) {
+    const el = document.querySelector(`[data-ht-block-id="${patch.id}"]`);
+    if (!(el instanceof HTMLElement)) continue;
+    if (!el.title) el.title = el.textContent ?? "";
+    el.textContent = patch.text;
+    el.classList.add(REWRITTEN_CLASS);
+  }
+}
+
+/** Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. */
+export function restoreOriginal(): void {
+  document.querySelectorAll(`.${REWRITTEN_CLASS}`).forEach((el) => {
+    if (!(el instanceof HTMLElement)) return;
+    el.textContent = el.title || el.textContent;
+    el.removeAttribute("title");
+    el.classList.remove(REWRITTEN_CLASS);
+  });
+  document.getElementById(STYLE_ID)?.remove();
+}

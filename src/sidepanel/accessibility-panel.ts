@@ -1,5 +1,5 @@
 import { computeFleschKincaidGrade } from "../lib/flesch-kincaid";
-import { extractPageBlocks } from "../content/functions";
+import { extractPageBlocks, applyRewrites, restoreOriginal } from "../content/functions";
 import { sendRewriteRequest } from "../lib/messages";
 import type { Grade, PageModel } from "../lib/types";
 
@@ -125,11 +125,31 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
         els.status.textContent = response.message;
         return;
       }
-      els.status.textContent = `Rewrote ${response.patches.length} paragraphs at grade ${grade}.`;
+
+      const tabId = await getActiveTabId();
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        func: applyRewrites,
+        args: [response.patches],
+      });
+
+      els.status.textContent = `Rewrote ${response.patches.length} paragraphs at grade ${grade}. Hover a paragraph to see the original.`;
+      els.restoreBtn.hidden = false;
     } catch (err) {
       els.status.textContent = err instanceof Error ? err.message : "Rewrite failed.";
     } finally {
       els.rewriteBtn.disabled = false;
+    }
+  });
+
+  els.restoreBtn.addEventListener("click", async () => {
+    try {
+      const tabId = await getActiveTabId();
+      await chrome.scripting.executeScript({ target: { tabId }, func: restoreOriginal });
+      els.restoreBtn.hidden = true;
+      els.status.textContent = "Original text restored.";
+    } catch (err) {
+      els.status.textContent = err instanceof Error ? err.message : "Restore failed.";
     }
   });
 }
