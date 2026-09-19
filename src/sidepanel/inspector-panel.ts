@@ -115,6 +115,21 @@ export function noExternalSourcesMessage(notChecked?: string): string {
   return notChecked ? `Not checked — ${notChecked}` : "No external verification found.";
 }
 
+const INSPECTION_KEY = "inspection";
+
+/** A finished inspection, kept in session storage so it outlives the side panel being closed. */
+interface SavedInspection {
+  tabId: number;
+  target: InspectTarget;
+  claims: ClaimCard[];
+  slop?: { report?: SlopReport; note?: string };
+  sources?: {
+    sourcesByQuote: Record<string, VerifiedSource[]>;
+    contextsByQuote: Record<string, ContextSource[]>;
+    notCheckedByQuote: Record<string, string>;
+  };
+}
+
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = "", text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -244,6 +259,21 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   let inspectedTarget: InspectTarget | null = null;
   /** Whether a Source Tracer endpoint is set, so cards don't claim to be checking when nothing will. */
   let tracerConfigured = false;
+  /**
+   * The finished inspection, mirrored to session storage. Closing the side panel destroys the
+   * panel's JS context, and with it the card map the page's claim badges message back into — so
+   * without this, every badge on the page goes dead the moment the panel is reopened.
+   */
+  let saved: SavedInspection | null = null;
+
+  function persistInspection(): void {
+    if (saved) void chrome.storage.session.set({ [INSPECTION_KEY]: saved });
+  }
+
+  function forgetInspection(): void {
+    saved = null;
+    void chrome.storage.session.remove(INSPECTION_KEY);
+  }
   let pickTabId: number | null = null;
   const cards = new Map<number, HTMLElement>();
   const sourceSections = new Map<string, { context: HTMLElement; external: HTMLElement }>();
@@ -479,6 +509,18 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     }
   }
 
+  function renderAllSources(sources: SavedInspection["sources"] & object): void {
+    const quotes = new Set([...Object.keys(sources.sourcesByQuote), ...Object.keys(sources.contextsByQuote)]);
+    for (const quote of quotes) {
+      renderVerifiedSources(
+        quote,
+        sources.sourcesByQuote[quote] ?? [],
+        sources.contextsByQuote[quote] ?? [],
+        sources.notCheckedByQuote[quote],
+      );
+    }
+  }
+
   function renderSlop(report: SlopReport | undefined, note: string | undefined): void {
     slopSection.hidden = false;
     slopSection.replaceChildren(el("div", SECTION_LABEL, "Slop Check · GPTZero"));
@@ -590,21 +632,28 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
           provisionalSection.querySelector("div")?.replaceChildren("First read · local heuristics only");
           return;
         }
+        saved = { tabId, target: capturedTarget, claims: m.claims };
+        persistInspection();
         void renderClaims(m.claims, capturedTarget, tabId, myRun);
       },
       onSlop: (m) => {
-        if (myRun === runId) renderSlop(m.report, m.note);
+        if (myRun !== runId) return;
+        renderSlop(m.report, m.note);
+        if (saved) {
+          saved.slop = { report: m.report, note: m.note };
+          persistInspection();
+        }
       },
       onSources: (m) => {
         if (myRun !== runId) return;
-        const quotes = new Set([...Object.keys(m.sourcesByQuote), ...Object.keys(m.contextsByQuote)]);
-        for (const quote of quotes) {
-          renderVerifiedSources(
-            quote,
-            m.sourcesByQuote[quote] ?? [],
-            m.contextsByQuote[quote] ?? [],
-            m.notCheckedByQuote[quote],
-          );
+        renderAllSources(m);
+        if (saved) {
+          saved.sources = {
+            sourcesByQuote: m.sourcesByQuote,
+            contextsByQuote: m.contextsByQuote,
+            notCheckedByQuote: m.notCheckedByQuote,
+          };
+          persistInspection();
         }
       },
       onDone: () => {
@@ -641,8 +690,31 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
       await chrome.scripting.executeScript({ target: { tabId: inspectedTabId }, func: clearClaimMarks }).catch(() => {});
     }
     inspectedTarget = null;
+    forgetInspection();
     resetResults();
     setStatus("Cleared.");
+  }
+
+  /**
+   * Rebuilds the last inspection after the side panel was closed and reopened, then re-places the
+   * page badges so their click handlers point at the cards that now exist.
+   */
+  async function restoreInspection(): Promise<void> {
+    const stored = await chrome.storage.session.get(INSPECTION_KEY);
+    const previous = stored[INSPECTION_KEY] as SavedInspection | undefined;
+    if (!previous?.claims?.length) return;
+    if (runId !== 0 || inspectedTarget) return; // the reader already started something newer
+
+    saved = previous;
+    inspectedTabId = previous.tabId;
+    inspectedTarget = previous.target;
+    tracerConfigured = (await getSourceTracerUrl()) !== null;
+
+    renderPassage(previous.target);
+    await renderClaims(previous.claims, previous.target, previous.tabId, runId);
+    if (previous.slop) renderSlop(previous.slop.report, previous.slop.note);
+    if (previous.sources) renderAllSources(previous.sources);
+    setStatus(`Showing your last inspection — ${previous.claims.length} claim${previous.claims.length === 1 ? "" : "s"}.`);
   }
 
   pickBtn.addEventListener("click", togglePick);
@@ -815,4 +887,6 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
 
   outlineBtn.addEventListener("click", buildOutline);
   showOnPage.addEventListener("change", () => void syncLabelsToPage());
+
+  void restoreInspection();
 }
