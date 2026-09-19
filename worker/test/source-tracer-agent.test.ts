@@ -33,7 +33,9 @@ describe("source tracer", () => {
         candidate.url === matchingCandidate.url
           ? { title: "Official release", url: matchingCandidate.url, text: "Revenue increased from $1 million to $4 million in 2025." }
           : { title: "Coverage", url: nonMatchingCandidate.url, text: "Revenue was $4 million after a strong year." },
-      index: async (source) => indexed.push(source.url),
+      index: async (source) => {
+        indexed.push(source.url);
+      },
     });
 
     const streamed: unknown[] = [];

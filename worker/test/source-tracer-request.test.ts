@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
+import type { Env } from "../src/types";
 
-async function loadWorker(): Promise<{ default?: { fetch?: (request: Request, env?: unknown) => Promise<Response> } } | null> {
+async function loadWorker(): Promise<typeof import("../src/index") | null> {
   try {
     return await import("../src/index");
   } catch {
@@ -17,12 +18,13 @@ describe("POST /v1/trace", () => {
     const module = await loadWorker();
     expect(module).not.toBeNull();
 
-    const response = await module?.default?.fetch?.(
+    const response = await module?.default.fetch(
       new Request("https://worker.test/v1/trace", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ claim: "Revenue rose", page: { url: "https://example.test", title: "Example" } }),
       }),
+      {} as Env,
     );
 
     expect(response?.status).toBe(400);
@@ -33,12 +35,13 @@ describe("POST /v1/trace", () => {
     const module = await loadWorker();
     expect(module).not.toBeNull();
 
-    const response = await module?.default?.fetch?.(
+    const response = await module?.default.fetch(
       new Request("https://worker.test/v1/trace", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: "not json",
       }),
+      {} as Env,
     );
 
     expect(response?.status).toBe(400);
@@ -50,7 +53,7 @@ describe("POST /v1/trace", () => {
     expect(module).not.toBeNull();
     const idNames: string[] = [];
     const forwarded: Request[] = [];
-    const response = await module?.default?.fetch?.(
+    const response = await module?.default.fetch(
       new Request("https://worker.test/v1/trace", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -74,7 +77,7 @@ describe("POST /v1/trace", () => {
             },
           }),
         },
-      },
+      } as unknown as Env,
     );
 
     expect(response?.status).toBe(200);

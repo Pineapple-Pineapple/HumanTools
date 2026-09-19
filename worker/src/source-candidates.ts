@@ -24,7 +24,11 @@ export function canonicalizeCandidateUrl(value: string): string | null {
 
   if (url.protocol !== "https:") return null;
   url.hash = "";
-  for (const key of [...url.searchParams.keys()]) {
+  const keysToDelete: string[] = [];
+  url.searchParams.forEach((_, key) => {
+    if (TRACKING_PARAMETER.test(key)) keysToDelete.push(key);
+  });
+  for (const key of keysToDelete) {
     if (TRACKING_PARAMETER.test(key)) url.searchParams.delete(key);
   }
   return url.toString().replace(/\?$/, "");

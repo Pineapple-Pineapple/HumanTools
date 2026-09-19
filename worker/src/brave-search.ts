@@ -24,7 +24,7 @@ function parseResults(payload: unknown): RawSearchResult[] {
 export class BraveSearchClient {
   constructor(
     private readonly apiKey: string,
-    private readonly fetcher: Fetcher = fetch,
+    private readonly fetcher: Fetcher = (input, init) => globalThis.fetch(input, init),
   ) {}
 
   async search(query: string, signal: AbortSignal = AbortSignal.timeout(8_000)): Promise<RawSearchResult[]> {

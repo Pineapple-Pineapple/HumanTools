@@ -9,12 +9,9 @@ function json(body: unknown, status = 200): Response {
 }
 
 function hasVerifiedQuote(value: unknown): value is { verifiedQuote: string; installId?: unknown } {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as Record<string, unknown>).verifiedQuote === "string" &&
-    (value as Record<string, unknown>).verifiedQuote.trim().length > 0
-  );
+  if (typeof value !== "object" || value === null) return false;
+  const payload = value as Record<string, unknown>;
+  return typeof payload.verifiedQuote === "string" && payload.verifiedQuote.trim().length > 0;
 }
 
 export default {

@@ -1,4 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+
+const nativeFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = nativeFetch;
+});
 
 async function loadBraveSearch(): Promise<typeof import("../src/brave-search") | null> {
   try {
@@ -9,6 +15,20 @@ async function loadBraveSearch(): Promise<typeof import("../src/brave-search") |
 }
 
 describe("BraveSearchClient", () => {
+  it("calls the Worker fetch function with globalThis as its receiver", async () => {
+    const module = await loadBraveSearch();
+    expect(module).not.toBeNull();
+    let receiver: unknown;
+    globalThis.fetch = async function (this: unknown) {
+      receiver = this;
+      return Response.json({ web: { results: [] } });
+    };
+
+    await new module!.BraveSearchClient("token").search("revenue rose");
+
+    expect(receiver).toBe(globalThis);
+  });
+
   it("maps web results and sends the subscription token", async () => {
     const module = await loadBraveSearch();
     expect(module).not.toBeNull();
