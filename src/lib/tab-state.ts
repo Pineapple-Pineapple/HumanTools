@@ -17,6 +17,7 @@ const stores: Evictable[] = [];
 const activatedListeners: TabListener[] = [];
 const navigatedListeners: TabListener[] = [];
 const loadedListeners: TabListener[] = [];
+const closedListeners: TabListener[] = [];
 
 let currentTabId: number | null = null;
 /** The window this panel belongs to. Tab events fire for every window; only ours matter. */
@@ -42,6 +43,14 @@ export function onTabNavigated(listener: TabListener): void {
  */
 export function onTabLoaded(listener: TabListener): void {
   loadedListeners.push(listener);
+}
+
+/**
+ * Fires when a tab closes, after its stored results have been dropped. Panels that keep per-tab
+ * state somewhere a `TabStore` cannot reach — session storage, say — clean it up here.
+ */
+export function onTabClosed(listener: TabListener): void {
+  closedListeners.push(listener);
 }
 
 export interface TabStore<T> {
@@ -94,4 +103,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   for (const listener of navigatedListeners) listener(tabId);
 });
 
-chrome.tabs.onRemoved.addListener(evict);
+chrome.tabs.onRemoved.addListener((tabId) => {
+  evict(tabId);
+  for (const listener of closedListeners) listener(tabId);
+});
