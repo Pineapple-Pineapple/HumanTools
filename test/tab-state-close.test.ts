@@ -24,6 +24,7 @@ async function loadTabState(): Promise<{
 
   vi.resetModules();
   const module = await import("../src/lib/tab-state");
+  await module.initTabState();
   return {
     module,
     close: (tabId) => {

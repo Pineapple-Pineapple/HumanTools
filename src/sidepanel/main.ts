@@ -7,6 +7,9 @@ import { mountSecurityPanel } from "./security-panel";
 import { mountApplicationPanel } from "./application-panel";
 import { mountSetupBanner } from "./setup-banner";
 import { PANEL_SHOWN_EVENT } from "../lib/panel-visibility";
+import { initTabState } from "../lib/tab-state";
+
+void initTabState();
 
 const app = document.getElementById("app")!;
 
