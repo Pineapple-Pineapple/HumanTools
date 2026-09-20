@@ -1,4 +1,5 @@
 import type { Provider } from "../lib/types";
+import { selectedProvider } from "../lib/provider";
 
 type StoredKey = "openaiApiKey" | "openrouterApiKey" | "gptzeroApiKey" | "sourceTracerUrl";
 
@@ -253,7 +254,7 @@ const inputs: Record<StoredKey, HTMLInputElement> = {
 let storedValues: Partial<Record<StoredKey, string>> = {};
 let storedProvider: Provider | null = null;
 
-function selectedProvider(): Provider {
+function checkedProvider(): Provider {
   return providerRows.openrouter.radio.checked ? "openrouter" : "openai";
 }
 
@@ -264,8 +265,8 @@ chrome.storage.local.get(["provider", ...STORED_KEYS]).then((stored) => {
       inputs[key].value = stored[key];
     }
   }
-  if (stored.provider === "openai" || stored.provider === "openrouter") storedProvider = stored.provider;
-  providerRows[storedProvider ?? "openai"].radio.checked = true;
+  storedProvider = selectedProvider(stored);
+  providerRows[storedProvider].radio.checked = true;
 });
 
 // Any edit after a save makes "Saved." a lie, so drop it.
@@ -291,7 +292,7 @@ saveBtn.addEventListener("click", async () => {
 
   // With exactly one key filled in, that provider is the only one that can work, whatever the radio says.
   const keyed = PROVIDERS.filter((p) => values[`${p}ApiKey`]);
-  const provider = keyed.length === 1 ? keyed[0] : selectedProvider();
+  const provider = keyed.length === 1 ? keyed[0] : checkedProvider();
   providerRows[provider].radio.checked = true;
 
   const set: Partial<Record<StoredKey | "provider", string>> = {};

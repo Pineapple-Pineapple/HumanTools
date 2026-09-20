@@ -17,7 +17,7 @@ import { parseOutlineLabels, parseSlopResponse, validateClaims } from "../lib/in
 import type { ClaimValidation } from "../lib/inspect-validate";
 import { requestSourceTrace } from "../lib/source-tracer-client";
 import type { ContextSource, VerifiedSource } from "../lib/source-tracer-client";
-import { PROVIDER_KEY_NAMES, getSourceTracerUrl, selectedProvider } from "../lib/provider";
+import { PROVIDER_STORAGE_KEYS, getSourceTracerUrl, resolveProvider, selectedProvider } from "../lib/provider";
 import { SseParser, chatDelta } from "../lib/sse";
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -60,13 +60,12 @@ interface ModelAccess {
   signal: AbortSignal;
 }
 
-/** The selected provider and its stored key — the only place a key is ever read. */
+/** The provider to call and its stored key — the only place a key is ever used. */
 async function resolveModel(signal: AbortSignal): Promise<ModelAccess | { error: string }> {
-  const stored = await chrome.storage.local.get(["provider", ...Object.values(PROVIDER_KEY_NAMES)]);
-  const provider = selectedProvider(stored);
-  const apiKey: unknown = stored[PROVIDER_KEY_NAMES[provider]];
-  if (typeof apiKey !== "string" || !apiKey) return { error: `No ${PROVIDERS[provider].label} API key set.` };
-  return { provider, apiKey, signal };
+  const stored = await chrome.storage.local.get([...PROVIDER_STORAGE_KEYS]);
+  const resolved = resolveProvider(stored);
+  if (!resolved) return { error: `No ${PROVIDERS[selectedProvider(stored)].label} API key set.` };
+  return { ...resolved, signal };
 }
 
 function modelCacheKey(access: ModelAccess, ...parts: (string | number)[]): string {

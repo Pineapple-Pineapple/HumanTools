@@ -6,18 +6,39 @@ export const PROVIDER_KEY_NAMES = { openai: "openaiApiKey", openrouter: "openrou
   string
 >;
 
+export const PROVIDER_STORAGE_KEYS = ["provider", ...Object.values(PROVIDER_KEY_NAMES)] as const;
+
 /** The provider picked in Settings — OpenAI until the reader chooses otherwise. */
 export function selectedProvider(stored: { provider?: unknown }): Provider {
   return stored.provider === "openrouter" ? "openrouter" : "openai";
 }
 
+export interface ResolvedProvider {
+  provider: Provider;
+  apiKey: string;
+}
+
 /**
- * Whether the selected provider has a key. Presence only: the key itself is read in the service
- * worker and nowhere else.
+ * The provider a call should use, and its key: the selected one when it has a key, otherwise the
+ * one provider that does. Settings can no longer save a key behind the wrong radio, but storage
+ * written by an older build can still hold that shape, and a working key must not be stranded
+ * behind a stale choice. Null when no provider has a key at all. The service worker and the panels
+ * both answer "is there a key?" through this, so they can never disagree.
  */
+export function resolveProvider(stored: Record<string, unknown>): ResolvedProvider | null {
+  const selected = selectedProvider(stored);
+  const other: Provider = selected === "openai" ? "openrouter" : "openai";
+  for (const provider of [selected, other]) {
+    const apiKey = stored[PROVIDER_KEY_NAMES[provider]];
+    if (typeof apiKey === "string" && apiKey) return { provider, apiKey };
+  }
+  return null;
+}
+
+/** Presence only: the key itself is used in the service worker and nowhere else. */
 export async function hasApiKey(): Promise<boolean> {
-  const stored = await chrome.storage.local.get(["provider", ...Object.values(PROVIDER_KEY_NAMES)]);
-  return Boolean(stored[PROVIDER_KEY_NAMES[selectedProvider(stored)]]);
+  const stored = await chrome.storage.local.get([...PROVIDER_STORAGE_KEYS]);
+  return resolveProvider(stored) !== null;
 }
 
 /** The configured Source Tracer endpoint, or null when it's unset or not https. */
