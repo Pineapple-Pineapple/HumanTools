@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-async function loadCandidates(): Promise<typeof import("../src/source-candidates") | null> {
+async function loadCandidates(): Promise<typeof import("../src/lib/tracer/source-candidates") | null> {
   try {
-    return await import("../src/source-candidates");
+    return await import("../src/lib/tracer/source-candidates");
   } catch {
     return null;
   }

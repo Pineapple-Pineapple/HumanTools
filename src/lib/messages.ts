@@ -1,5 +1,5 @@
 import type { Block, ClaimCard, Grade, InspectTarget, OutlineLabel, RewriteFormat, SlopReport } from "./types";
-import type { ContextSource, VerifiedSource } from "./source-tracer-client";
+import type { ContextSource, TracedSource } from "./tracer";
 
 export interface RewritePatch {
   id: string;
@@ -205,7 +205,7 @@ export interface InspectSlop {
 
 export interface InspectSources {
   type: "INSPECT_SOURCES";
-  sourcesByQuote: Record<string, VerifiedSource[]>;
+  sourcesByQuote: Record<string, TracedSource[]>;
   contextsByQuote: Record<string, ContextSource[]>;
   /**
    * Per-claim reason the tracer produced no result — no endpoint configured, or the run failed.
