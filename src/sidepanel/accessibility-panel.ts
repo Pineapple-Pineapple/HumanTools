@@ -315,6 +315,13 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
         void Promise.allSettled(landing).then(() => regrade(tabId));
         update(tabId, { rewriting: false, status: msg.message });
       },
+      onDisconnect: () => {
+        void Promise.allSettled(landing).then(() => regrade(tabId));
+        update(tabId, {
+          rewriting: false,
+          status: "Lost the connection to the extension mid-rewrite. Whatever was rewritten is still on the page.",
+        });
+      },
     });
   });
 

@@ -876,6 +876,18 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
         setStatus(doneStatus(cards.size));
         updateToolbar();
       },
+      onDisconnect: () => {
+        // The service worker went away mid-run. Whatever landed stays; the reader is told rather
+        // than left on "Analyzing…" with Clear as the only way out.
+        if (!current()) return;
+        const lost = "Lost the connection to the extension before this finished.";
+        if (!record.claims?.length) record.error = lost;
+        runs.delete(tabId);
+        persistInspection(record);
+        if (!onShownTab(tabId)) return;
+        setStatus(record.claims?.length ? `${doneStatus(cards.size)} ${lost}` : lost);
+        updateToolbar();
+      },
     });
 
     tracerConfigured = (await getSourceTracerUrl()) !== null;

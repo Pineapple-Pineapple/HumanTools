@@ -63,7 +63,8 @@ function onDropped(port: chrome.runtime.Port, settled: () => boolean, handler: (
 }
 
 /** Opens a "rewrite" port and streams progress back via handlers as each paragraph completes. */
-export function startRewrite(blocks: Block[], grade: Grade, format: RewriteFormat, handlers: RewriteHandlers): void {
+/** Returns a cancel: disconnecting aborts the service worker's in-flight paragraph calls. */
+export function startRewrite(blocks: Block[], grade: Grade, format: RewriteFormat, handlers: RewriteHandlers): () => void {
   const port = chrome.runtime.connect({ name: "rewrite" });
   let settled = false;
 
@@ -91,6 +92,7 @@ export function startRewrite(blocks: Block[], grade: Grade, format: RewriteForma
 
   const request: RewriteRequest = { type: "REWRITE_REQUEST", blocks, grade, format };
   port.postMessage(request);
+  return () => port.disconnect();
 }
 
 export interface ChatTurn {
