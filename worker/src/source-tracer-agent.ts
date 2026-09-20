@@ -1,5 +1,5 @@
 import type { FetchedSource } from "./browserbase-fetch";
-import type { VerifiedSource } from "./elastic-index";
+import type { RecalledSource, VerifiedSource } from "./elastic-index";
 import { classifySourceContext, sourceQuality, type CandidateSource, type SourceContextReason } from "./source-candidates";
 import { verifySourceExcerpt } from "./source-verify";
 import type { SourceTraceRequest } from "./types";
@@ -8,7 +8,7 @@ export type TraceState = "running" | "done" | "skipped" | "failed";
 
 export interface SourceTraceEvent {
   type: "SOURCE_TRACE";
-  step: "Source search" | "Source fetch" | "Source verifier" | "Source index";
+  step: "Source recall" | "Source search" | "Source fetch" | "Source verifier" | "Source index";
   state: TraceState;
   detail?: string;
   ms?: number;
@@ -18,6 +18,7 @@ export type TracedSource = VerifiedSource & { verification: "verified" };
 export type ContextSource = VerifiedSource & { verification: "context"; contextReasons: SourceContextReason[] };
 
 export interface SourceTracerDependencies {
+  recall: (request: SourceTraceRequest) => Promise<RecalledSource[]>;
   search: (request: SourceTraceRequest) => Promise<CandidateSource[]>;
   fetch: (candidate: CandidateSource) => Promise<FetchedSource>;
   index: (source: TracedSource, verifiedQuote: string) => Promise<void>;
@@ -27,6 +28,32 @@ export interface SourceTraceOutcome {
   sources: TracedSource[];
   contexts: ContextSource[];
   trace: SourceTraceEvent[];
+}
+
+/**
+ * How long a source already verified against this exact quote may stand in for a fresh fetch. The
+ * index is a record of what a page said when it was read, and pages change.
+ */
+const RECALL_FRESHNESS_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_CANDIDATES = 5;
+
+function isFresh(verifiedAt: string, now: number): boolean {
+  const at = Date.parse(verifiedAt);
+  return Number.isFinite(at) && now - at <= RECALL_FRESHNESS_MS;
+}
+
+/** A remembered source becomes an ordinary lead: its excerpt is what the search would have shown. */
+function toCandidate(source: VerifiedSource): CandidateSource {
+  return { url: source.url, title: source.title, description: source.excerpt, domainScore: 0 };
+}
+
+/** Remembered leads go first — they are already known to carry the quote — then the search's own. */
+function mergeCandidates(recalled: readonly CandidateSource[], searched: readonly CandidateSource[]): CandidateSource[] {
+  const merged = new Map<string, CandidateSource>();
+  for (const candidate of [...recalled, ...searched]) {
+    if (!merged.has(candidate.url)) merged.set(candidate.url, candidate);
+  }
+  return [...merged.values()].slice(0, MAX_CANDIDATES);
 }
 
 function contextDetail(reasons: readonly SourceContextReason[]): string {
@@ -66,15 +93,45 @@ export function makeSourceTracer(
         onTrace?.(event);
       };
 
+      // Step 0: ask what is already known before spending a search and a browser fetch on it.
+      report("Source recall", "running");
+      const recallStarted = Date.now();
+      let recalledCandidates: CandidateSource[] = [];
+      try {
+        const recalled = await dependencies.recall(request);
+        const now = Date.now();
+        const settled = recalled.filter((hit) => hit.exact && isFresh(hit.source.verifiedAt, now));
+        if (settled.length) {
+          report("Source recall", "done", `${settled.length} already verified`, Date.now() - recallStarted);
+          return {
+            sources: settled.map((hit) => ({ ...hit.source, verification: "verified" as const })),
+            contexts: [],
+            trace,
+          };
+        }
+        recalledCandidates = recalled.map((hit) => toCandidate(hit.source));
+        report(
+          "Source recall",
+          recalledCandidates.length ? "done" : "skipped",
+          recalledCandidates.length ? `${recalledCandidates.length} leads, none already verified` : "Nothing held for this claim.",
+          Date.now() - recallStarted,
+        );
+      } catch (error) {
+        // The index is memory, not the record. Losing it costs speed, never correctness.
+        report("Source recall", "failed", error instanceof Error ? error.message : "Recall failed.", Date.now() - recallStarted);
+      }
+
       report("Source search", "running");
       const searchStarted = Date.now();
       let candidates: CandidateSource[];
       try {
-        candidates = await dependencies.search(request);
+        candidates = mergeCandidates(recalledCandidates, await dependencies.search(request));
         report("Source search", "done", `${candidates.length} candidates`, Date.now() - searchStarted);
       } catch (error) {
         report("Source search", "failed", error instanceof Error ? error.message : "Search failed.", Date.now() - searchStarted);
-        return { sources: [], contexts: [], trace };
+        // A search that fails does not waste the leads the index already gave us.
+        if (recalledCandidates.length === 0) return { sources: [], contexts: [], trace };
+        candidates = recalledCandidates.slice(0, MAX_CANDIDATES);
       }
 
       const inspected = await mapWithConcurrency(candidates, 2, async (candidate): Promise<TracedSource | ContextSource | null> => {

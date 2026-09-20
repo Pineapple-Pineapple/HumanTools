@@ -31,6 +31,14 @@ function isSourceTraceRequest(value: unknown): value is SourceTraceRequest {
 export class SourceTracerAgent extends Agent<Env, SourceTracerState> {
   initialState: SourceTracerState = { lastVerifiedSourceCount: 0 };
 
+  /** Held on the agent rather than built per request, so the index mapping is checked once. */
+  private elasticIndex?: ElasticSourceIndex;
+
+  private get elastic(): ElasticSourceIndex {
+    this.elasticIndex ??= new ElasticSourceIndex(this.env.ELASTIC_URL, this.env.ELASTIC_API_KEY);
+    return this.elasticIndex;
+  }
+
   async onRequest(request: Request): Promise<Response> {
     let payload: unknown;
     try {
@@ -44,8 +52,9 @@ export class SourceTracerAgent extends Agent<Env, SourceTracerState> {
     const browserbase = new BrowserbaseFetcher({
       apiKey: this.env.BROWSERBASE_API_KEY,
     });
-    const elastic = new ElasticSourceIndex(this.env.ELASTIC_URL, this.env.ELASTIC_API_KEY);
+    const elastic = this.elastic;
     const tracer = makeSourceTracer({
+      recall: (input) => elastic.search(input.claim, input.verifiedQuote),
       search: async (input) => rankCandidates(await search.search(`${input.claim} "${input.verifiedQuote}"`)),
       fetch: (candidate) => browserbase.fetch(candidate),
       index: (source, quote) => elastic.index(source, quote),
