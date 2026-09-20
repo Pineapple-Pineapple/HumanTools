@@ -74,6 +74,49 @@ describe("BrowserbaseFetcher", () => {
     expect(requests[1].url).toBe("https://api.browserbase.com/v1/sessions/session-1");
   });
 
+  it("releases the session when the document read throws", async () => {
+    const module = await loadBrowserbase();
+    expect(module).not.toBeNull();
+    const requests: Request[] = [];
+    const fetcher = new module!.BrowserbaseFetcher({
+      apiKey: "key",
+      fetcher: async (input, init) => {
+        requests.push(new Request(input, init));
+        return Response.json({ id: "session-1", connectUrl: "wss://connect.browserbase.test/session-1" });
+      },
+      readDocument: async () => {
+        throw new Error("Browserbase returned no readable document.");
+      },
+    });
+
+    await expect(fetcher.fetch(candidate)).rejects.toThrow("no readable document");
+    expect(requests.map((request) => request.url)).toEqual([
+      "https://api.browserbase.com/v1/sessions",
+      "https://api.browserbase.com/v1/sessions/session-1",
+    ]);
+    expect(await requests[1].json()).toEqual({ status: "REQUEST_RELEASE" });
+  });
+
+  it("aborts a read that outlives its budget and still releases the session", async () => {
+    const module = await loadBrowserbase();
+    expect(module).not.toBeNull();
+    const released: string[] = [];
+    const fetcher = new module!.BrowserbaseFetcher({
+      apiKey: "key",
+      timeoutMs: 20,
+      fetcher: async (input, init) => {
+        const request = new Request(input, init);
+        if (request.url.endsWith("/sessions/session-1")) released.push(request.url);
+        return Response.json({ id: "session-1", connectUrl: "wss://connect.browserbase.test/session-1" });
+      },
+      readDocument: (_connectUrl, _targetUrl, signal) =>
+        new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true })),
+    });
+
+    await expect(fetcher.fetch(candidate)).rejects.toThrow("Browserbase fetch timed out.");
+    expect(released).toEqual(["https://api.browserbase.com/v1/sessions/session-1"]);
+  });
+
   it("retries a transient document read once", async () => {
     const module = await loadBrowserbase();
     expect(module).not.toBeNull();

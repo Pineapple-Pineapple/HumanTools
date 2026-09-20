@@ -14,6 +14,33 @@ async function loadBraveSearch(): Promise<typeof import("../src/brave-search") |
   }
 }
 
+describe("searchQuery", () => {
+  it("quotes the verified text after the claim", async () => {
+    const module = await loadBraveSearch();
+    expect(module!.searchQuery("Revenue rose.", "revenue  increased")).toBe('Revenue rose. "revenue increased"');
+    expect(module!.searchQuery("", "revenue increased")).toBe('"revenue increased"');
+  });
+
+  it("keeps the query inside Brave's 400 character and 50 word limits, trimming the claim first", async () => {
+    const module = await loadBraveSearch();
+    const claim = Array.from({ length: 40 }, (_, i) => `claim${i}`).join(" ");
+    const quote = Array.from({ length: 30 }, (_, i) => `quote${i}`).join(" ");
+
+    const query = module!.searchQuery(claim, quote);
+
+    expect(query.split(/\s+/)).toHaveLength(50);
+    expect(query).toContain(`"${quote}"`);
+    expect(query.startsWith("claim0 ")).toBe(true);
+
+    const wholeQuote = module!.searchQuery("w".repeat(300), `${"q".repeat(300)} tail`);
+    expect(wholeQuote).toBe(`"${"q".repeat(300)} tail"`);
+
+    const oversizedQuote = module!.searchQuery("claim", Array.from({ length: 45 }, () => "wordsword9").join(" "));
+    expect(oversizedQuote.length).toBeLessThanOrEqual(400);
+    expect(oversizedQuote).toMatch(/^"(wordsword9 )+wordsword9"$/);
+  });
+});
+
 describe("BraveSearchClient", () => {
   it("calls the Worker fetch function with globalThis as its receiver", async () => {
     const module = await loadBraveSearch();
