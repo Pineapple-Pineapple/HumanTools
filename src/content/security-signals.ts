@@ -153,10 +153,8 @@ export function collectSecuritySignals(): SecuritySignals {
 
     forms.push({
       label: labelForForm(form, index),
-      method: (form.getAttribute("method") || "get").toLowerCase(),
       action,
       actionRaw: actionRaw === null ? "" : squash(actionRaw),
-      hasActionAttribute: actionRaw !== null,
       formActions,
       fields: fieldEls.slice(0, MAX_FIELDS).map(readField),
       fieldsTruncated: fieldEls.length > MAX_FIELDS,
@@ -189,14 +187,19 @@ export function collectSecuritySignals(): SecuritySignals {
 
   // ---- Code sources and mixed content ----------------------------------------------------------
   const codeSources: { kind: "script" | "iframe"; url: string; origin: string }[] = [];
+  let codeSourcesTruncated = false;
   for (const el of queryAll("script[src], iframe[src]")) {
-    if (codeSources.length >= MAX_CODE_SOURCES) break;
     const href = absolute(el.getAttribute("src"));
     if (!href) continue;
+    if (codeSources.length >= MAX_CODE_SOURCES) {
+      codeSourcesTruncated = true;
+      break;
+    }
     codeSources.push({ kind: el.tagName.toLowerCase() === "script" ? "script" : "iframe", url: href, origin: originOf(href) });
   }
 
   const mixedContent: { kind: "script" | "iframe" | "image" | "stylesheet" | "media" | "object"; url: string }[] = [];
+  let mixedContentTruncated = false;
   if (location.protocol === "https:") {
     const groups: { selector: string; attribute: string; kind: "script" | "iframe" | "image" | "stylesheet" | "media" | "object" }[] = [
       { selector: "script[src]", attribute: "src", kind: "script" },
@@ -209,32 +212,30 @@ export function collectSecuritySignals(): SecuritySignals {
     ];
     for (const group of groups) {
       for (const el of queryAll(group.selector)) {
-        if (mixedContent.length >= MAX_MIXED) break;
         const raw = el.getAttribute(group.attribute);
         if (!raw) continue;
         // Read the declared URL, not the resolved property: the browser may have upgraded or
         // blocked it, and what the page asked for is the thing worth reporting.
         const href = absolute(raw);
-        if (href.startsWith("http://")) mixedContent.push({ kind: group.kind, url: href });
+        if (!href.startsWith("http://")) continue;
+        if (mixedContent.length >= MAX_MIXED) {
+          mixedContentTruncated = true;
+          break;
+        }
+        mixedContent.push({ kind: group.kind, url: href });
       }
     }
   }
 
-  // ---- What this walker itself could not see ---------------------------------------------------
   // Frames are counted, not opened: the same collector is injected into every frame in the tab, and
   // the panel subtracts the frames that answered from this count to say what was left unread.
   const frameCount = queryAll("iframe, frame").length;
-  const notCollected: string[] = [];
-  if (queryAll("form[target]").length > 0) {
-    notCollected.push("Where a form that targets a frame or a named window ends up after it is submitted.");
-  }
 
   return {
     url: pageUrl,
     origin: pageOrigin,
     protocol: location.protocol,
     hostname: location.hostname,
-    title: squash(document.title),
     forms,
     formsTruncated: allForms.length > MAX_FORMS,
     looseSensitiveFields,
@@ -242,10 +243,9 @@ export function collectSecuritySignals(): SecuritySignals {
     linksTruncated: anchors.length > MAX_LINKS,
     linkCount: anchors.length,
     codeSources,
-    codeSourcesTruncated: codeSources.length >= MAX_CODE_SOURCES,
+    codeSourcesTruncated,
     mixedContent,
-    mixedContentTruncated: mixedContent.length >= MAX_MIXED,
+    mixedContentTruncated,
     frameCount,
-    notCollected,
   };
 }

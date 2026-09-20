@@ -30,6 +30,20 @@ import type { AskGroup } from "../lib/security-heuristics";
 import type { Finding, SecurityReading, SecuritySignals, SensitiveAsk, Severity } from "../lib/security-heuristics";
 import { createTabStore, getCurrentTabId, onTabActivated, onTabNavigated } from "../lib/tab-state";
 import { whenVisible } from "../lib/panel-visibility";
+import {
+  ATTENTION_CHIP,
+  BODY,
+  BTN,
+  CHIP,
+  el,
+  H1,
+  NEUTRAL_CHIP,
+  NOTE,
+  pageAccessError,
+  SECTION_LABEL,
+  SMALL_BTN,
+  STATUS,
+} from "./ui";
 
 const SEVERITY_LABEL: Record<Severity, string> = {
   high: "Worth stopping for",
@@ -43,16 +57,11 @@ const SEVERITY_BAR: Record<Severity, string> = {
   low: "border-l-neutral-600",
 };
 
-const CHIP = "inline-flex items-center px-1.5 py-0.5 rounded border text-[11px] leading-none";
-const NEUTRAL_CHIP = `${CHIP} bg-neutral-800 text-neutral-300 border-neutral-600`;
-const ATTENTION_CHIP = `${CHIP} bg-amber-950 text-amber-300 border-amber-800`;
-const SECTION_LABEL = "text-[11px] uppercase tracking-wide text-muted";
-const BTN =
-  "inline-flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800 border border-neutral-600 rounded text-neutral-100";
-const SMALL_BTN =
-  "self-start inline-flex items-center gap-1.5 px-2 py-1 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800 border border-neutral-600 rounded text-neutral-100 text-xs";
-const BODY = "text-xs text-neutral-300 leading-relaxed";
-const NOTE = "text-[11px] text-muted leading-snug";
+const SEVERITY_DOT: Record<Severity, string> = {
+  high: "bg-red-500",
+  medium: "bg-amber-500",
+  low: "bg-neutral-500",
+};
 
 /**
  * Links offered a follow button at once. Every press is a real request from the reader's address,
@@ -60,22 +69,6 @@ const NOTE = "text-[11px] text-muted leading-snug";
  * than four hundred buttons.
  */
 const MAX_RESOLVABLE_SHOWN = 20;
-
-function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = "", text?: string): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-/** Turns scripting failures on pages extensions can't touch into something a reader understands. */
-function pageAccessError(err: unknown): string {
-  const message = err instanceof Error ? err.message : String(err);
-  if (/cannot access|cannot be scripted|extensions gallery|chrome:\/\//i.test(message)) {
-    return "This page can't be read — browser pages and extension stores are off-limits to extensions.";
-  }
-  return message || "Couldn't read this page.";
-}
 
 function transportChip(reading: SecurityReading): HTMLElement {
   if (reading.transport === "https") {
@@ -86,14 +79,9 @@ function transportChip(reading: SecurityReading): HTMLElement {
   if (reading.transport === "http") {
     return el("span", `${CHIP} bg-red-950 text-red-300 border-red-800`, "http — not encrypted");
   }
-  return el("span", NEUTRAL_CHIP, reading.transport);
+  // A file, a blob, an extension page: nothing travelled over a network to get here.
+  return el("span", NEUTRAL_CHIP, "not served over http or https");
 }
-
-const SEVERITY_DOT: Record<Severity, string> = {
-  high: "bg-red-500",
-  medium: "bg-amber-500",
-  low: "bg-neutral-500",
-};
 
 /** The severity mix as one bar, which is what the summary sentence used to say in words. */
 function renderSeverityBar(findings: readonly Finding[]): HTMLElement {
@@ -367,7 +355,6 @@ function renderFlaggedLink(link: FlaggedLink): HTMLElement {
   if (link.frameUrl) card.append(el("div", NOTE, `In frame ${link.frameUrl}`));
 
   const button = el("button", SMALL_BTN, "Follow it and report where it lands");
-  button.title = resolveDisclosure(link.href);
   card.append(el("div", NOTE, resolveDisclosure(link.href)), button);
 
   const result = el("div", "flex flex-col gap-1");
@@ -397,7 +384,7 @@ function renderLinkResolver(signals: SecuritySignals, frames: readonly SecurityS
       el(
         "p",
         BODY,
-        "No link on this page is a shortener, an encoded name, or text that disagrees with where it points, so there is nothing here worth spending a request on. The addresses of the rest are already readable above.",
+        "No link on this page is a shortener, an encoded name, a wrapper around another address, or text that disagrees with where it points, so there is nothing here worth spending a request on. The addresses of the rest are already readable above.",
       ),
     );
     return block;
@@ -452,7 +439,7 @@ export function mountSecurityPanel(container: HTMLElement): void {
 
   const header = el("div", "flex flex-col gap-1.5");
   const titleRow = el("div", "flex items-baseline justify-between gap-2");
-  titleRow.append(el("h1", "text-neutral-100 font-medium", "Security"));
+  titleRow.append(el("h1", H1, "Security"));
   const aboutBtn = el("button", "text-[11px] text-neutral-400 hover:text-neutral-200 px-1 py-0.5", "How this reads the page");
   titleRow.appendChild(aboutBtn);
   const about = el("div", "flex flex-col gap-1.5");
@@ -485,7 +472,7 @@ export function mountSecurityPanel(container: HTMLElement): void {
   toolbar.appendChild(checkBtn);
   root.appendChild(toolbar);
 
-  const status = el("p", "text-xs text-muted min-h-[1em]", "Nothing checked yet.");
+  const status = el("p", STATUS, "Nothing checked yet.");
   root.appendChild(status);
 
   const origin = el("div", "flex flex-col gap-2");
@@ -612,7 +599,7 @@ export function mountSecurityPanel(container: HTMLElement): void {
         status.textContent = "That form is no longer on the page.";
       }
     } catch (err) {
-      status.textContent = pageAccessError(err);
+      status.textContent = pageAccessError(err, "read");
     }
   }
 
@@ -661,7 +648,7 @@ export function mountSecurityPanel(container: HTMLElement): void {
       status.textContent = view.status;
     } catch (err) {
       if (!stillCurrent(tabId, myRun)) return;
-      status.textContent = pageAccessError(err);
+      status.textContent = pageAccessError(err, "read");
     } finally {
       if (myRun === runId) checkBtn.disabled = false;
     }
