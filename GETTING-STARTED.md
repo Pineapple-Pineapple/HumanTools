@@ -128,29 +128,26 @@ Everything above is now working, and this is the one piece of Human Tools that i
 
 Its code is in this repo under `worker/`. It is separate for one reason: the credentials it needs — a search API, a remote browser, a search index — must never sit in a browser extension, where any page's script could reach for them. There is no shared Human Tools service to point at instead; the endpoint is yours.
 
-Per claim it asks its Elasticsearch index whether it has already verified this exact quote (anything verified in the last 30 days stands), and only otherwise spends anything: one Brave search for candidates, then up to five of them loaded in a Browserbase browser, keeping only sources where the quote is really present. What it verifies goes back into the index.
+Per claim it spends one Brave search for candidates, then loads up to five of them in a Browserbase browser, keeping only sources where the quote is really present. Nothing is cached between traces: the same claim costs the same again.
 
 ### What you need
 
-Four accounts. Each has a free way in; none of them is unlimited.
+Three accounts. Each has a free way in; none of them is unlimited.
 
 | | Where to get it | What it costs |
 | --- | --- | --- |
 | **Cloudflare account** | [dash.cloudflare.com/sign-up](https://dash.cloudflare.com/sign-up) | The free Workers plan is enough. The Worker's single Durable Object is SQLite-backed, which the free plan includes (100,000 requests a day). |
 | **`BRAVE_SEARCH_API_KEY`** | [api-dashboard.search.brave.com](https://api-dashboard.search.brave.com/) → subscribe to a Web Search plan → **API Keys** | Metered since February 2026: roughly $5 of free credit a month (about 1,000 queries), and a card is required even to stay inside it. |
 | **`BROWSERBASE_API_KEY`** | [browserbase.com](https://www.browserbase.com/) → **Settings** | Free plan: 3 concurrent browsers and about one browser-hour, no card. The key is all you need — the project is inferred from it. |
-| **`ELASTIC_URL` + `ELASTIC_API_KEY`** | [cloud.elastic.co](https://cloud.elastic.co/) → create a deployment or serverless project → copy the **Elasticsearch endpoint**, then create an API key | Free trial, then paid. Elastic Cloud already ships the two inference endpoints the Worker asks for: `.elser-2-elasticsearch` for embeddings and `.rerank-v1-elasticsearch` for reranking. |
 
-`ELASTIC_URL` is the **Elasticsearch** endpoint (`https://….es.….cloud.es.io`), not the Kibana address. You don't create the index: the Worker creates `human-tools-sources` with its own mapping on the first trace. A self-managed cluster that lacks the reranker is fine — the Worker sees the rejection, drops the reranking step and lets the fused search stand, rather than failing the trace.
-
-Budget before you start. One claim is one search and up to five page loads; a paragraph with ten claims can be ten searches and fifty page loads. The index is what keeps a second look at the same claim from costing anything.
+Budget before you start, because nothing is cached: one claim is one search and up to five page loads, so a paragraph with ten claims can be ten searches and fifty page loads — and inspecting it again costs the same again.
 
 ### Deploy it
 
 ```sh
 cd worker
 npm ci
-npm test              # 48 tests, no credentials needed
+npm test              # 39 tests, no credentials needed
 npx wrangler login    # opens Cloudflare in your browser, once
 npm run deploy        # prints https://human-tools-source-tracer.<your-subdomain>.workers.dev
 ```
@@ -160,8 +157,6 @@ Then hand it the credentials. Each command prompts for the value and stores it e
 ```sh
 npx wrangler secret put BRAVE_SEARCH_API_KEY
 npx wrangler secret put BROWSERBASE_API_KEY
-npx wrangler secret put ELASTIC_URL
-npx wrangler secret put ELASTIC_API_KEY
 ```
 
 (Setting the secrets before the first deploy also works — wrangler offers to create the Worker for you.)
@@ -176,7 +171,7 @@ https://human-tools-source-tracer.<your-subdomain>.workers.dev/v1/trace
 
 It must start with `https://` — Options refuses to save anything else, because the extension ignores a non-https endpoint, and you would be left wondering why everything still said *Not checked*. **Save**.
 
-Now inspect a paragraph that leans on something external — a news story citing a study — and open **Trace**. You should see **Source recall**, **Source search**, **Source fetch** and **Source verifier** steps with their timings, and cards naming external sources with the excerpt that matched. The first trace is the slow one: Elastic is creating the index and warming its model.
+Now inspect a paragraph that leans on something external — a news story citing a study — and open **Trace**. You should see **Source search**, **Source fetch** and **Source verifier** steps with their timings, and cards naming external sources with the excerpt that matched.
 
 ### Running it locally
 
@@ -205,7 +200,6 @@ curl -N localhost:8787/v1/trace -H 'content-type: application/json' -d '{
 - **"The Source Tracer is rate-limiting this install"** — 30 traces per 10 minutes per install. Add `TRACE_RATE_LIMIT` and `TRACE_RATE_WINDOW_SECONDS` as `vars` in `worker/wrangler.jsonc` to change that.
 - **Trace shows *Source search* failed with "Brave returned an invalid search response"** — the Brave key is wrong, its plan lapsed, or the credit is gone. A single `curl` to `https://api.search.brave.com/res/v1/web/search?q=test` with an `X-Subscription-Token` header tells you which.
 - **Every *Source fetch* fails** — Browserbase is out of browser-hours, or the key is wrong. `npx wrangler tail` shows the Worker's own errors while you retry.
-- **Trace shows *Source recall* failed** — Elastic is unreachable or its key is wrong. Traces still run; they just stop remembering, and the search spend goes up.
 
 ## What to try next
 
