@@ -413,21 +413,23 @@ async function handleInspectRequest(
     const installId = typeof stored.sourceTracerInstallId === "string" ? stored.sourceTracerInstallId : crypto.randomUUID();
     if (installId !== stored.sourceTracerInstallId) await chrome.storage.local.set({ sourceTracerInstallId: installId });
 
-    await runPool(claims, signal, async (claim) => {
+    // Steps are keyed by name in the panel, so each claim's rows carry its card number.
+    await runPool(claims.map((claim, i) => ({ claim, n: i + 1 })), signal, async ({ claim, n }) => {
+      const step = (name: string) => `${name} · claim ${n}`;
       const request = { claim: claim.claim, verifiedQuote: claim.verifiedQuote, page: { url: target.url, title: target.title } };
       const cacheKey = `${sourceTracerUrl}:${fnv1a(JSON.stringify(request))}`;
       const cached = sourceCache.get(cacheKey);
       if (cached) {
         sourcesByQuote[claim.verifiedQuote] = cached.sources;
         contextsByQuote[claim.verifiedQuote] = cached.contexts;
-        trace("Source Tracer", "done", `${cached.sources.length} verified source${cached.sources.length === 1 ? "" : "s"} · cached`, 0);
+        trace(step("Source Tracer"), "done", `${cached.sources.length} verified source${cached.sources.length === 1 ? "" : "s"} · cached`, 0);
         return;
       }
       try {
         const result = await requestSourceTrace(
           sourceTracerUrl,
           { ...request, installId },
-          (event) => trace(event.step, event.state, event.detail, event.ms),
+          (event) => trace(step(event.step), event.state, event.detail, event.ms),
           signal,
         );
         sourceCache.set(cacheKey, { sources: result.sources, contexts: result.contexts });
@@ -438,7 +440,7 @@ async function handleInspectRequest(
         sourcesByQuote[claim.verifiedQuote] = [];
         contextsByQuote[claim.verifiedQuote] = [];
         notCheckedByQuote[claim.verifiedQuote] = message;
-        trace("Source Tracer", "failed", message);
+        trace(step("Source Tracer"), "failed", message);
       }
     });
     post({ type: "INSPECT_SOURCES", sourcesByQuote, contextsByQuote, notCheckedByQuote });

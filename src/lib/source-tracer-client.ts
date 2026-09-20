@@ -148,20 +148,33 @@ export function parseSourceTraceLines(lines: readonly string[]): SourceTraceResu
 
 /**
  * Streams one trace from the Worker, reporting each trace event as its line arrives. Aborting
- * `signal` cancels the request; the Worker stops the trace on its end when the body closes.
+ * `signal` cancels the request; the Worker stops the trace on its end when the body closes. A
+ * trace that produces nothing for `TRACE_TIMEOUT_MS` is abandoned so a stalled Worker cannot hold
+ * the Inspector on "Checking…" indefinitely.
  */
+const TRACE_TIMEOUT_MS = 90_000;
+
 export async function requestSourceTrace(
   endpoint: string,
   request: { claim: string; verifiedQuote: string; page: { url: string; title: string }; installId: string },
   onTrace: (event: SourceTraceEvent) => void,
   signal?: AbortSignal,
 ): Promise<SourceTraceResult> {
+  const timeout = AbortSignal.timeout(TRACE_TIMEOUT_MS);
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
-    signal,
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
+  if (response.status === 429) {
+    const wait = Number(response.headers.get("Retry-After"));
+    throw new Error(
+      Number.isFinite(wait) && wait > 0
+        ? `The Source Tracer is rate-limiting this install; try again in ${Math.ceil(wait)}s.`
+        : "The Source Tracer is rate-limiting this install; try again shortly.",
+    );
+  }
   if (!response.ok) throw new Error(`Source tracing failed (${response.status}).`);
   if (!response.body) throw new Error("Source tracer returned no response stream.");
 
