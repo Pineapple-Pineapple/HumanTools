@@ -59,11 +59,11 @@ Keys stay in `chrome.storage.local`; the background service worker is the only p
 
 ## Source Tracer Worker (optional)
 
-`worker/` is a separate Cloudflare Worker that finds and checks external sources for Inspector's claims: Brave Search for candidates, Browserbase to load each one and confirm the quote is really there, Elasticsearch to remember what it has seen. It exists so those credentials never live in the browser. There is no shared service: the endpoint is one you deploy to your own account and paste into Options. Without it, Inspector still works and shows "Not checked" for external sources.
+`worker/` is a separate Cloudflare Worker that finds and checks external sources for Inspector's claims: Brave Search for candidates and Browserbase to load each one and confirm the quote is really there. It exists so those credentials never live in the browser. There is no shared service: the endpoint is one you deploy to your own account and paste into Options. Without it, Inspector still works and shows "Not checked" for external sources.
 
 **Deploying it, and getting its four credentials: [GETTING-STARTED.md §7](./GETTING-STARTED.md#7-optional-the-source-tracer-worker).**
 
-How it behaves: a trace is answered from the index alone when that exact quote was verified there within 30 days; otherwise it costs one search and up to five browser fetches for that claim, and whatever verifies is indexed for next time. The endpoint is rate-limited per install (30 traces per 10 minutes by default; `TRACE_RATE_LIMIT` / `TRACE_RATE_WINDOW_SECONDS` vars override) and refuses oversized requests. The Worker creates its own `human-tools-sources` index; a cluster without the `.rerank-v1-elasticsearch` endpoint loses the reranking step, not the trace. `npm test` in `worker/` is 48 tests and needs no credentials.
+How it behaves: each claim costs one search and up to five browser fetches, every time — nothing is remembered between traces. The endpoint is rate-limited per install (30 traces per 10 minutes by default; `TRACE_RATE_LIMIT` / `TRACE_RATE_WINDOW_SECONDS` vars override) and refuses oversized requests. `npm test` in `worker/` is 39 tests and needs no credentials.
 
 ## Working on it
 

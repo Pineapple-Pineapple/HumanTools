@@ -1,7 +1,6 @@
 import { Agent } from "agents";
 import { BraveSearchClient, searchQuery } from "./brave-search";
 import { BrowserbaseFetcher } from "./browserbase-fetch";
-import { ElasticSourceIndex } from "./elastic-index";
 import { rateLimitPolicy, takeRateLimitToken, type RateLimitWindow } from "./rate-limit";
 import { rankCandidates } from "./source-candidates";
 import { makeSourceTracer } from "./source-tracer-agent";
@@ -19,15 +18,6 @@ function json(body: unknown, status = 200, headers: Record<string, string> = {})
 
 export class SourceTracerAgent extends Agent<Env> {
   /** Held on the agent rather than built per request, so the index mapping is checked once. */
-  private elasticIndex?: ElasticSourceIndex;
-
-  /** The index is memory, not the record: a missing configuration costs recall and indexing, never the trace. */
-  private get elastic(): ElasticSourceIndex {
-    if (!this.env.ELASTIC_URL || !this.env.ELASTIC_API_KEY) throw new Error("Elastic is not configured.");
-    this.elasticIndex ??= new ElasticSourceIndex(this.env.ELASTIC_URL, this.env.ELASTIC_API_KEY);
-    return this.elasticIndex;
-  }
-
   async onRequest(request: Request): Promise<Response> {
     const parsed = await readTraceRequest(request);
     if (!parsed.ok) return json({ error: parsed.error }, 400);
@@ -43,10 +33,8 @@ export class SourceTracerAgent extends Agent<Env> {
     const search = new BraveSearchClient(this.env.BRAVE_SEARCH_API_KEY);
     const browserbase = new BrowserbaseFetcher({ apiKey: this.env.BROWSERBASE_API_KEY });
     const tracer = makeSourceTracer({
-      recall: async (input) => this.elastic.search(input.claim, input.verifiedQuote),
       search: async (input) => rankCandidates(await search.search(searchQuery(input.claim, input.verifiedQuote))),
       fetch: (candidate) => browserbase.fetch(candidate),
-      index: async (source, quote) => this.elastic.index(source, quote),
     });
 
     const stream = new TransformStream<Uint8Array, Uint8Array>();
