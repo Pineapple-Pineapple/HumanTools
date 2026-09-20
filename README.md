@@ -2,6 +2,8 @@
 
 DevTools for what a page *means*, not how it's built. A Chromium side panel with five tabs named after DevTools panels, each answering a human question about the page in front of you.
 
+New here? [**GETTING-STARTED.md**](./GETTING-STARTED.md) walks through installing it and using each panel once on a real page.
+
 | Panel | Question | Needs a key? |
 | --- | --- | --- |
 | **Accessibility** | Make this understandable. | Grading: no. Rewriting: yes. |
