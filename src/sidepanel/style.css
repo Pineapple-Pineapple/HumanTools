@@ -1,6 +1,16 @@
 @import "tailwindcss";
 @import "katex/dist/katex.min.css";
 
+/*
+ * The panels' dimmest text. Tailwind's neutral-500 (#737373) on the neutral-900 ground is 3.78:1,
+ * under the 4.5 floor, and it was carrying every caption, section label and disclosure in the UI.
+ * This sits between neutral-400 and neutral-500 so the three tiers of emphasis survive: 5.2:1 on
+ * the panel ground, 4.7:1 on a neutral-800/70 card, both passing.
+ */
+@theme {
+  --color-muted: #8a8a8a;
+}
+
 html,
 body,
 #app {
