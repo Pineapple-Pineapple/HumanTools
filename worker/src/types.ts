@@ -4,6 +4,9 @@ export interface Env {
   BROWSERBASE_API_KEY: string;
   ELASTIC_URL: string;
   ELASTIC_API_KEY: string;
+  /** Optional wrangler vars; see rate-limit.ts for the defaults they override. */
+  TRACE_RATE_LIMIT?: string;
+  TRACE_RATE_WINDOW_SECONDS?: string;
 }
 
 export interface SourceTraceRequest {
