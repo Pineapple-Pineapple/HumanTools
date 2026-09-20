@@ -1,6 +1,6 @@
 # Getting started
 
-A first session with Human Tools: install it, give it a key, and use each panel once on a real page. About fifteen minutes. Everything you have to set up lives here — where each key comes from, and how to deploy the optional Source Tracer Worker ([§7](#7-optional-the-source-tracer-worker), another twenty minutes if you want it). [`README.md`](./README.md) says what the tool is and how it behaves; this is the walkthrough.
+A first session with Human Tools: install it, give it a key, and use each panel once on a real page. About fifteen minutes. Everything you have to set up lives here — where each key comes from, including the optional ones for source tracing ([§7](#7-optional-source-tracing)). [`README.md`](./README.md) says what the tool is and how it behaves; this is the walkthrough.
 
 ## 1. Install it
 
@@ -72,7 +72,7 @@ Keys are written to `chrome.storage.local` and read in exactly one place, the ex
 Two optional fields you can ignore for now:
 
 - **GPTZero API key** — turns on Inspector's Slop Check, an AI-text probability for a passage. Keys come from the [GPTZero API dashboard](https://app.gptzero.me/app/api).
-- **Source Tracer endpoint** — a Cloudflare Worker *you* deploy, which finds and checks a claim's sources out on the web. It needs four accounts of its own, so leave this empty for now; [§7](#7-optional-the-source-tracer-worker) is the whole procedure. Without it, Inspector works fine and honestly reports external sources as *Not checked* rather than pretending it looked.
+- **Brave Search key**, and optionally a **Browserbase key** — these let Inspector look for a claim's sources out on the web. Leave them empty for now; [§7](#7-optional-source-tracing) covers them. Without them, Inspector works fine and honestly reports external sources as *Not checked* rather than pretending it looked.
 
 Back in the panel, the banner is gone.
 
@@ -122,84 +122,33 @@ Switch the segmented control to **Outline** and press **Outline this page** for 
 
 **Clear** removes the badges and the cards.
 
-## 7. Optional: the Source Tracer Worker
+## 7. Optional: source tracing
 
-Everything above is now working, and this is the one piece of Human Tools that isn't the extension: a Cloudflare Worker you deploy to your own account, which Inspector calls to look for a claim's sources *outside* the page. Skip it and Inspector still works — external sources read *Not checked*, which is true rather than flattering.
+Everything above works from the page in front of you. This is the one feature that looks *outside* it: Inspector searches for a claim's exact quote, opens what it finds, and keeps only pages where that quote is really there. Skip it and Inspector still works — external sources read *Not checked*, which is true rather than flattering.
 
-Its code is in this repo under `worker/`. It is separate for one reason: the credentials it needs — a search API, a remote browser, a search index — must never sit in a browser extension, where any page's script could reach for them. There is no shared Human Tools service to point at instead; the endpoint is yours.
-
-Per claim it spends one Brave search for candidates, then loads up to five of them in a Browserbase browser, keeping only sources where the quote is really present. Nothing is cached between traces: the same claim costs the same again.
-
-### What you need
-
-Three accounts. Each has a free way in; none of them is unlimited.
+It needs one key, and optionally a second.
 
 | | Where to get it | What it costs |
 | --- | --- | --- |
-| **Cloudflare account** | [dash.cloudflare.com/sign-up](https://dash.cloudflare.com/sign-up) | The free Workers plan is enough. The Worker's single Durable Object is SQLite-backed, which the free plan includes (100,000 requests a day). |
-| **`BRAVE_SEARCH_API_KEY`** | [api-dashboard.search.brave.com](https://api-dashboard.search.brave.com/) → subscribe to a Web Search plan → **API Keys** | Metered since February 2026: roughly $5 of free credit a month (about 1,000 queries), and a card is required even to stay inside it. |
-| **`BROWSERBASE_API_KEY`** | [browserbase.com](https://www.browserbase.com/) → **Settings** | Free plan: 3 concurrent browsers and about one browser-hour, no card. The key is all you need — the project is inferred from it. |
+| **Brave Search** — required | [api-dashboard.search.brave.com](https://api-dashboard.search.brave.com/) → subscribe to a Web Search plan → **API Keys** | Metered: roughly $5 of free credit a month (about 1,000 queries), and a card is required even to stay inside it. |
+| **Browserbase** — optional | [browserbase.com](https://www.browserbase.com/) → **Settings** | Free plan: 3 concurrent browsers and about one browser-hour, no card. The key is all you need — the project is inferred from it. |
 
-Budget before you start, because nothing is cached: one claim is one search and up to five page loads, so a paragraph with ten claims can be ten searches and fifty page loads — and inspecting it again costs the same again.
+Paste them into Options and **Save**.
 
-### Deploy it
+**What the Browserbase key changes.** With it, a candidate page is opened in a real cloud browser: pages that build their text with script are read properly, and your address never reaches the page. Without it, the extension fetches the page directly — free, much faster, no account — but a script-rendered page arrives as an empty shell and simply fails to verify, and the site sees your IP. Neither is wrong; the first is more thorough, the second is simpler.
 
-```sh
-cd worker
-npm ci
-npm test              # 39 tests, no credentials needed
-npx wrangler login    # opens Cloudflare in your browser, once
-npm run deploy        # prints https://human-tools-source-tracer.<your-subdomain>.workers.dev
-```
+**Budget before you start.** One claim is one search and up to five page loads, and nothing is cached — a paragraph with ten claims can be ten searches and fifty page loads, and inspecting it again costs the same again.
 
-Then hand it the credentials. Each command prompts for the value and stores it encrypted on the Worker — never in this repo, never in the bundle — and takes effect without deploying again:
+### See it work
 
-```sh
-npx wrangler secret put BRAVE_SEARCH_API_KEY
-npx wrangler secret put BROWSERBASE_API_KEY
-```
+Inspect a paragraph that leans on something external — a news story citing a study — and open **Trace**. You should see **Source search**, **Source fetch** and **Source verifier** steps with their timings, and cards naming external sources with the excerpt that matched.
 
-(Setting the secrets before the first deploy also works — wrangler offers to create the Worker for you.)
+### If tracing looks wrong
 
-### Point the extension at it
-
-Options → **Source Tracer endpoint**: the URL the deploy printed, with `/v1/trace` on the end.
-
-```
-https://human-tools-source-tracer.<your-subdomain>.workers.dev/v1/trace
-```
-
-It must start with `https://` — Options refuses to save anything else, because the extension ignores a non-https endpoint, and you would be left wondering why everything still said *Not checked*. **Save**.
-
-Now inspect a paragraph that leans on something external — a news story citing a study — and open **Trace**. You should see **Source search**, **Source fetch** and **Source verifier** steps with their timings, and cards naming external sources with the excerpt that matched.
-
-### Running it locally
-
-`npm run dev` serves the Worker on `http://localhost:8787`, reading credentials from a gitignored file instead of the deployed secrets:
-
-```sh
-cd worker
-cp .dev.vars.example .dev.vars   # fill in the same four values
-npm run dev
-```
-
-The extension can't talk to that (Options requires https), so drive it with `curl`. The reply is one JSON line per trace event as it happens:
-
-```sh
-curl -N localhost:8787/v1/trace -H 'content-type: application/json' -d '{
-  "claim": "Sea level has risen about four inches since 1993",
-  "verifiedQuote": "sea level has risen about four inches since 1993",
-  "page": { "url": "https://example.com/article", "title": "Example" },
-  "installId": "dev"
-}'
-```
-
-### If the tracer looks wrong
-
-- **Every claim still says *Not checked*** — the endpoint didn't save (it must start with `https://`), or the run never reached source tracing. **Trace** says which.
-- **"The Source Tracer is rate-limiting this install"** — 30 traces per 10 minutes per install. Add `TRACE_RATE_LIMIT` and `TRACE_RATE_WINDOW_SECONDS` as `vars` in `worker/wrangler.jsonc` to change that.
-- **Trace shows *Source search* failed with "Brave returned an invalid search response"** — the Brave key is wrong, its plan lapsed, or the credit is gone. A single `curl` to `https://api.search.brave.com/res/v1/web/search?q=test` with an `X-Subscription-Token` header tells you which.
-- **Every *Source fetch* fails** — Browserbase is out of browser-hours, or the key is wrong. `npx wrangler tail` shows the Worker's own errors while you retry.
+- **Every claim still says *Not checked*** — no Brave key saved, or the run never reached source tracing. **Trace** says which.
+- **Trace shows *Source search* failed** — the Brave key is wrong, its plan lapsed, or the credit is gone. One `curl` to `https://api.search.brave.com/res/v1/web/search?q=test` with an `X-Subscription-Token` header tells you which.
+- **Every *Source fetch* fails, with a Browserbase key set** — out of browser-hours, or the key is wrong. The free plan also allows only 3 browsers at once, and a paragraph with several claims can ask for more than that.
+- **Sources are found but never verify, without a Browserbase key** — likely a site that renders its text with script, so the direct fetch saw an empty page. That is the case the Browserbase key exists for.
 
 ## What to try next
 
@@ -212,5 +161,5 @@ curl -N localhost:8787/v1/trace -H 'content-type: application/json' -d '{
 
 - **"No paragraph text found on this page."** — the page has no readable prose blocks, or it's still loading. Some app-shell sites genuinely have nothing to read.
 - **A panel says "No OpenAI API key set."** — open Options and press **Test key**; the key may be rejected rather than missing.
-- **Inspector shows "Not checked" for external sources** — expected unless you deployed the Source Tracer Worker ([§7](#7-optional-the-source-tracer-worker)). It means nothing was checked, not that nothing was found.
+- **Inspector shows "Not checked" for external sources** — expected until you add a Brave Search key ([§7](#7-optional-source-tracing)). It means nothing was checked, not that nothing was found.
 - **Changes vanished after a reload** — rewrites and badges live in the page, so a reload clears them. The panel notices and updates rather than claiming they're still there.

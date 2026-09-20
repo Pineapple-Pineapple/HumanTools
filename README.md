@@ -2,7 +2,7 @@
 
 DevTools for what a page *means*, not how it's built. A Chromium side panel with five tabs named after DevTools panels, each answering a human question about the page in front of you.
 
-New here? [**GETTING-STARTED.md**](./GETTING-STARTED.md) is the walkthrough and the setup guide: installing it, where every key comes from, deploying the optional Source Tracer Worker, and using each panel once on a real page. This file is the reference for what the tool is and how it behaves.
+New here? [**GETTING-STARTED.md**](./GETTING-STARTED.md) is the walkthrough and the setup guide: installing it, where every key comes from, and using each panel once on a real page. This file is the reference for what the tool is and how it behaves.
 
 | Panel | Question | Needs a key? |
 | --- | --- | --- |
@@ -20,7 +20,7 @@ New here? [**GETTING-STARTED.md**](./GETTING-STARTED.md) is the walkthrough and 
 
 **Console** is a chat about the page. The page's text and links are handed to the model as data in their own turn, never inside the instructions. Answers must quote the page verbatim; every quote is checked against the real page text, and verified ones become numbered badges that scroll the page to the passage. Each browser tab keeps its own thread. **Stop** cuts a reply short; a reply that goes silent for 90 s is ended with a note.
 
-**Inspector** takes a selection or a picked paragraph and extracts claims. Every claim's quote must be found verbatim in the passage or it is dropped by code, not by the model; cited sources can only be links the page itself contains. Each card shows claim type, evidence status (supported / partly supported / unverified / contradicted), framing flags, and what could not be checked. Numbered badges on the page click back to their cards, and survive tab switches, panel reopening and reload. Optional: a GPTZero **Slop Check** (a probability, never proof of authorship) and external source tracing through your own Worker (below). **Outline** mode labels the page's blocks as important, supporting, navigation, ad or boilerplate.
+**Inspector** takes a selection or a picked paragraph and extracts claims. Every claim's quote must be found verbatim in the passage or it is dropped by code, not by the model; cited sources can only be links the page itself contains. Each card shows claim type, evidence status (supported / partly supported / unverified / contradicted), framing flags, and what could not be checked. Numbered badges on the page click back to their cards, and survive tab switches, panel reopening and reload. Optional: a GPTZero **Slop Check** (a probability, never proof of authorship) and external source tracing (below). **Outline** mode labels the page's blocks as important, supporting, navigation, ad or boilerplate.
 
 **Security** reads what the page itself shows: transport, where every form posts and what it collects, links whose text names a different site than their target, punycode hostnames (decoded), third-party code origins, and every frame and open shadow root. Findings carry a severity each — never summed into a score, never a verdict. Two buttons reach the network **only when pressed** and say what they send first: domain age via RDAP, and following a flagged link's redirects.
 
@@ -37,7 +37,7 @@ Every panel ends with **Blind spots**: only real, current limits of that reading
 
 ## Setup
 
-Step by step, including which accounts and keys each panel needs and where to get them: [**GETTING-STARTED.md**](./GETTING-STARTED.md). In outline — build, load `dist/` unpacked at `chrome://extensions`, then paste an **OpenAI** or **OpenRouter** key into the extension's **Options** and press **Test**. A GPTZero key (Slop Check) and a Source Tracer endpoint (below) are optional.
+Step by step, including which accounts and keys each panel needs and where to get them: [**GETTING-STARTED.md**](./GETTING-STARTED.md). In outline — build, load `dist/` unpacked at `chrome://extensions`, then paste an **OpenAI** or **OpenRouter** key into the extension's **Options** and press **Test**. A GPTZero key (Slop Check) and Brave Search / Browserbase keys (source tracing, below) are optional.
 
 ```sh
 bun install
@@ -54,16 +54,18 @@ Keys stay in `chrome.storage.local`; the background service worker is the only p
 - **Provider calls** (rewrite, chat, claims, outline labels) go only to the provider you picked, from the service worker, with page text passed as data. They happen only on your button press.
 - **GPTZero** receives the inspected passage, only if you added a key.
 - **Security's two buttons** state, before you press them, that one sends a hostname to `rdap.org` and the other contacts a link's destination from your IP.
-- **The Source Tracer** receives a claim and its quote, only if you configured an endpoint — and that endpoint is a Worker you deploy yourself.
+- **Source tracing** sends a claim's quote to Brave Search, and opens the results it finds — through Browserbase's cloud browser if you gave it a key, otherwise fetched directly from here, which reveals your address to those pages. Only if you added a Brave key.
 - Rewrites are reversible until the page reloads.
 
-## Source Tracer Worker (optional)
+## Source tracing (optional)
 
-`worker/` is a separate Cloudflare Worker that finds and checks external sources for Inspector's claims: Brave Search for candidates and Browserbase to load each one and confirm the quote is really there. It exists so those credentials never live in the browser. There is no shared service: the endpoint is one you deploy to your own account and paste into Options. Without it, Inspector still works and shows "Not checked" for external sources.
+Inspector can look for a claim's sources *outside* the page: it searches Brave for the claim's exact quote, opens what it finds, and keeps only pages where that quote is really present. Add a **Brave Search API key** in Options to turn it on. Without one, external verification reads "Not checked", which is true rather than flattering.
 
-**Deploying it, and getting its four credentials: [GETTING-STARTED.md §7](./GETTING-STARTED.md#7-optional-the-source-tracer-worker).**
+A **Browserbase key** is optional on top of that. With it, candidates are opened in a cloud browser — which reads pages that build their text with script, and keeps your address off them. Without it they are fetched straight from the extension: free and much faster, but a script-rendered page arrives empty and simply fails to verify.
 
-How it behaves: each claim costs one search and up to five browser fetches, every time — nothing is remembered between traces. The endpoint is rate-limited per install (30 traces per 10 minutes by default; `TRACE_RATE_LIMIT` / `TRACE_RATE_WINDOW_SECONDS` vars override) and refuses oversized requests. `npm test` in `worker/` is 39 tests and needs no credentials.
+Each claim costs one search and up to five page loads, every time; nothing is cached between traces, so inspecting the same paragraph again costs the same again.
+
+This used to be a Cloudflare Worker you deployed yourself, on the principle that search and browser credentials should never sit in a browser. That guarded a shared service which never existed — every install deployed its own Worker with its own keys — so the deployment step protected your keys from you, while the provider key that can actually run up a bill sat in extension storage the whole time. `docs/removing-the-worker.md` is the record of that decision.
 
 ## Working on it
 

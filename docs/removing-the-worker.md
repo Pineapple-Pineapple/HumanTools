@@ -1,53 +1,40 @@
 # Removing the Source Tracer Worker
 
-A standing note, written while removing Elastic, so that dropping the Worker later is a decision rather than an investigation. Nothing here is done; this is the map.
+**Done — 2026-09-20.** Kept as the record of why, since the reasoning outlives the change.
 
-## What it would cost
+## What the Worker was for
 
-Inspector loses **external source verification** — the step that goes out and checks whether a claim's quote appears anywhere off the page. Everything else in Inspector survives untouched: claim extraction, claim types, evidence statuses, framing flags, page-cited links, page-context classification, Slop Check, Outline, and the numbered page badges.
+Source tracing needs a search API and a way to load arbitrary pages. Putting those credentials in a browser extension is normally the wrong call, so the pipeline lived in a Cloudflare Worker and the extension called it over HTTP.
 
-The case for going ahead is that **it has never run for anyone.** It has always required deploying your own Cloudflare Worker, so every Inspector card in every install reads "Not checked". Removing it would delete roughly 2,300 lines that have never executed outside tests, drop two vendor accounts from setup, and let the README, the getting-started guide and the Options page stop explaining a feature nobody has.
+## Why that stopped making sense
 
-The case against is that it works — it just needs deploying — and it is the part of the product that most supports the "evidence, not verdicts" claim. Without it, Inspector reports what a page says about itself and no more.
+There was never a shared Human Tools service. Every install deployed **its own** Worker with **its own** keys — so the Worker was protecting the reader's credentials from the reader. Meanwhile the provider key, the one that can actually run up a bill, had been sitting in `chrome.storage.local` the whole time.
 
-## What to delete
+What the deployment step actually bought was nothing, and what it cost was the feature: it required a Cloudflare account, four secrets and a deploy before Inspector could check a single source, so in practice it never ran for anyone. Every card read "Not checked".
 
-**The whole `worker/` directory** — 20 files, ~1,800 lines, its own `package.json`, `wrangler.jsonc`, and the `test:worker` script in the root `package.json`.
+The principle is still right for a hosted service. It was the wrong shape for a bring-your-own-keys extension.
 
-**Extension-side client**
+## What happened
 
-- `src/lib/source-tracer-client.ts` and `test/source-tracer-client.test.ts`
+Moved to `src/lib/tracer/`, unchanged: `brave-search.ts`, `browserbase-fetch.ts`, `source-candidates.ts`, `source-verify.ts`, `source-tracer-agent.ts`, and their 23 tests.
 
-**Extension wiring** (edit, don't delete)
+Deleted, because they existed only to serve an HTTP boundary:
 
-| File | What goes |
-| --- | --- |
-| `src/background/service-worker.ts` | `runSourceTracer`, `sourceCache`, the `requestSourceTrace` import, `NO_TRACER_ENDPOINT`, and the `sourceTracerInstallId` storage read. `handleInspectRequest` stops posting `INSPECT_SOURCES`. |
-| `src/lib/messages.ts` | The `InspectSources` message and its entry in `InspectMessage`/`InspectHandlers`. |
-| `src/lib/provider.ts` | `getSourceTracerUrl`. |
-| `src/sidepanel/inspector-panel.ts` | The "External verification" and "Page context — not verification" sections, `renderVerifiedSources`, `renderAllSources`, `noExternalSourcesMessage`, `sourceContextMessage`, `sourceQualityMessage`, `tracerConfigured`, and `SavedInspection.sources`. |
-| `src/options/options.ts` | The `sourceTracerUrl` field, its https guard, and its help text. |
-| `test/inspector-source-context.test.ts` | Tests `sourceContextMessage` / `sourceQualityMessage` / `noExternalSourcesMessage` — all three disappear with the sections above. |
+- `source-tracer-do.ts` — the Durable Object, one per install, for routing and rate-limit state.
+- `index.ts` — the `POST /v1/trace` endpoint.
+- `trace-request.ts` — validation and size caps for a hostile request body. A local call has no untrusted caller.
+- `rate-limit.ts` — 30 traces per 10 minutes per install, to stop a leaked URL draining the budget. There is no URL now, and the reader spends their own quota.
+- `src/lib/source-tracer-client.ts` and its test — the NDJSON streaming client. With no wire, `traceSources` is a function call.
 
-**Docs**
+`src/lib/tracer/index.ts` is the new seam. `resolveTracerKeys` reads the keys; `traceSources` runs search → rank → fetch → verify and reports trace events through the same callback the panel already consumed.
 
-- `README.md` — the "Source Tracer Worker (optional)" section, the Inspector paragraph's mention of it, and the row in the privacy list.
-- `GETTING-STARTED.md` — section 7 in full, the Source Tracer line in step 3, and the "Not checked" entry under "If something looks wrong".
-- `docs/superpowers/` — the two `inspector-source-tracer` and two `inspector-source-context` files become history for a feature that no longer exists. Either delete them or leave them as an archive; the README already says these docs are point-in-time and diverge from the code.
+## What changed for the reader
 
-## Two things to get right
+- Options swaps **Source Tracer endpoint** for **Brave Search API key** and **Browserbase API key**.
+- Brave is required for tracing at all; without it, external verification reads "Not checked" exactly as before.
+- **Browserbase became optional.** With a key, candidates open in its cloud browser, as before — script-rendered pages are read, and the reader's address never reaches them. Without one, the extension fetches the page directly: free and faster, but a script-rendered page arrives empty and fails to verify, and the site sees the reader's IP. Disclosed in the field's own hint.
+- Rate limiting is gone, along with the endpoint that needed it.
 
-**The honesty wording has to go with it, not linger.** Inspector currently distinguishes "Not checked" (no tracer configured) from "No external verification found" (checked, found nothing) — that distinction was a deliberate fix and only makes sense while a tracer can exist. With the Worker gone, both strings should go; a claim card should simply not have an external-verification section rather than carry a permanently empty one.
+## Left behind on existing installs
 
-**`chrome.storage.local` keeps `sourceTracerUrl` and `sourceTracerInstallId` on existing installs.** Neither is read after the removal, so they are harmless, but a one-line `chrome.storage.local.remove([...])` on `runtime.onInstalled` would leave nothing behind.
-
-## Order
-
-1. Strip the extension wiring first (panel → messages → service worker → options) and confirm `npx tsc --noEmit` is clean — the compiler will find every reference.
-2. Delete `worker/`, the client, and their tests.
-3. Update the docs.
-4. `bun run test` and `bun run build`; drop `test:worker` from the root scripts.
-
-## What survives either way
-
-Brave Search and Browserbase are used **only** by the Worker, so both accounts become unnecessary. GPTZero is not — it is called directly from the extension's service worker for Slop Check and is unaffected. The provider key (OpenAI or OpenRouter) is likewise untouched.
+`chrome.storage.local` may still hold `sourceTracerUrl` and `sourceTracerInstallId` from an older build. Nothing reads them. A one-line `chrome.storage.local.remove([...])` on `runtime.onInstalled` would clear them if it ever seems worth it.
