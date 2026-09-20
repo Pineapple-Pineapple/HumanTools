@@ -47,11 +47,25 @@ export interface RewriteHandlers {
   onParagraphError: (msg: RewriteParagraphError) => void;
   onDone: (msg: RewriteDone) => void;
   onFatalError: (msg: RewriteFatalError) => void;
+  /** The service worker went away before REWRITE_DONE or REWRITE_FATAL_ERROR; no more messages will come. */
+  onDisconnect?: () => void;
+}
+
+/**
+ * Reports a port the service worker dropped. Chrome only fires `onDisconnect` for the other end,
+ * so a port this side closed is never reported; `settled` covers the same for any port already
+ * closed by a final message.
+ */
+function onDropped(port: chrome.runtime.Port, settled: () => boolean, handler: (() => void) | undefined): void {
+  port.onDisconnect.addListener(() => {
+    if (!settled()) handler?.();
+  });
 }
 
 /** Opens a "rewrite" port and streams progress back via handlers as each paragraph completes. */
 export function startRewrite(blocks: Block[], grade: Grade, format: RewriteFormat, handlers: RewriteHandlers): void {
   const port = chrome.runtime.connect({ name: "rewrite" });
+  let settled = false;
 
   port.onMessage.addListener((message: RewriteMessage) => {
     switch (message.type) {
@@ -62,15 +76,18 @@ export function startRewrite(blocks: Block[], grade: Grade, format: RewriteForma
         handlers.onParagraphError(message);
         break;
       case "REWRITE_DONE":
+        settled = true;
         handlers.onDone(message);
         port.disconnect();
         break;
       case "REWRITE_FATAL_ERROR":
+        settled = true;
         handlers.onFatalError(message);
         port.disconnect();
         break;
     }
   });
+  onDropped(port, () => settled, handlers.onDisconnect);
 
   const request: RewriteRequest = { type: "REWRITE_REQUEST", blocks, grade, format };
   port.postMessage(request);
@@ -106,6 +123,11 @@ export interface ChatHandlers {
   onDelta: (msg: ChatDelta) => void;
   onDone: (msg: ChatDone) => void;
   onError: (msg: ChatError) => void;
+  /**
+   * The service worker went away without CHAT_DONE or CHAT_ERROR; a turn in flight will never
+   * finish. Not fired after `close`.
+   */
+  onDisconnect?: () => void;
 }
 
 export interface ChatSession {
@@ -114,13 +136,14 @@ export interface ChatSession {
 }
 
 /**
- * Opens a long-lived "chat" port for a whole conversation. Call `send` once per turn with the
- * full message history so far; the service worker is stateless and replies by streaming
- * CHAT_DELTA chunks, ending each turn with CHAT_DONE or CHAT_ERROR. The port stays open across
- * turns until `close` is called.
+ * Opens a "chat" port. Call `send` once per turn with the full message history so far; the
+ * service worker is stateless and replies by streaming CHAT_DELTA chunks, ending each turn with
+ * CHAT_DONE or CHAT_ERROR. The port can carry as many turns as the caller likes and stays open
+ * until `close` is called.
  */
 export function openChatPort(handlers: ChatHandlers): ChatSession {
   const port = chrome.runtime.connect({ name: "chat" });
+  let closed = false;
 
   port.onMessage.addListener((message: ChatResponseMessage) => {
     switch (message.type) {
@@ -135,13 +158,17 @@ export function openChatPort(handlers: ChatHandlers): ChatSession {
         break;
     }
   });
+  onDropped(port, () => closed, handlers.onDisconnect);
 
   return {
     send: (messages) => {
       const request: ChatRequest = { type: "CHAT_REQUEST", messages };
       port.postMessage(request);
     },
-    close: () => port.disconnect(),
+    close: () => {
+      closed = true;
+      port.disconnect();
+    },
   };
 }
 
@@ -197,6 +224,8 @@ export interface InspectHandlers {
   onSlop: (msg: InspectSlop) => void;
   onSources: (msg: InspectSources) => void;
   onDone: () => void;
+  /** The service worker went away before INSPECT_DONE; the run is over. Not fired after cancel. */
+  onDisconnect?: () => void;
 }
 
 /**
@@ -206,6 +235,7 @@ export interface InspectHandlers {
  */
 export function startInspect(target: InspectTarget, handlers: InspectHandlers): () => void {
   const port = chrome.runtime.connect({ name: "inspect" });
+  let settled = false;
 
   port.onMessage.addListener((message: InspectMessage) => {
     switch (message.type) {
@@ -222,15 +252,20 @@ export function startInspect(target: InspectTarget, handlers: InspectHandlers): 
         handlers.onSources(message);
         break;
       case "INSPECT_DONE":
+        settled = true;
         handlers.onDone();
         port.disconnect();
         break;
     }
   });
+  onDropped(port, () => settled, handlers.onDisconnect);
 
   const request: InspectRequest = { type: "INSPECT_REQUEST", target };
   port.postMessage(request);
-  return () => port.disconnect();
+  return () => {
+    settled = true;
+    port.disconnect();
+  };
 }
 
 export interface OutlineRequestBlock {

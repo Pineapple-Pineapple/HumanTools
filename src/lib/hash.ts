@@ -1,4 +1,4 @@
-/** FNV-1a, used only to build in-memory rewrite-cache keys. Not cryptographic. */
+/** FNV-1a, used only to build the service worker's in-memory cache keys. Not cryptographic. */
 export function fnv1a(text: string): string {
   let hash = 0x811c9dc5;
   for (let i = 0; i < text.length; i++) {
