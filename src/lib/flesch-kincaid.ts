@@ -13,14 +13,17 @@ function isProseWord(token: string): boolean {
   return letters / token.length >= 0.6;
 }
 
-/** Flesch-Kincaid grade level, computed locally with no network call. */
-export function computeFleschKincaidGrade(text: string): number {
-  const sentences = text.split(/[.!?]+/).filter((s) => s.trim().length > 0);
-  const words = text
-    .split(/\s+/)
-    .filter((w) => w.trim().length > 0)
-    .filter(isProseWord);
-  if (sentences.length === 0 || words.length === 0) return 0;
+/**
+ * Flesch-Kincaid grade level, computed locally with no network call. Null when there is no prose
+ * to score — empty text, or nothing but math and symbols — rather than 0, which is the real grade
+ * of very simple prose.
+ */
+export function computeFleschKincaidGrade(text: string): number | null {
+  const proseWords = (s: string) => s.split(/\s+/).filter((w) => w.length > 0 && isProseWord(w));
+  // A segment with no prose in it — a displayed equation between two full stops — is not a sentence.
+  const sentences = text.split(/[.!?]+/).filter((s) => proseWords(s).length > 0);
+  const words = proseWords(text);
+  if (words.length === 0) return null;
 
   const syllables = words.reduce((sum, word) => sum + countSyllables(word), 0);
   const grade =
