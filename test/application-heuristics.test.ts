@@ -9,7 +9,6 @@ import {
   groupRequestedData,
   isConfirmshaming,
   matchKnownTracker,
-  registrableDomain,
   summarizeThirdParties,
 } from "../src/lib/application-heuristics";
 import type { RawApplicationSignals, RawControl, RawFormField } from "../src/lib/application-heuristics";
@@ -44,9 +43,7 @@ function control(overrides: Partial<RawControl> = {}): RawControl {
 function signals(overrides: Partial<RawApplicationSignals> = {}): RawApplicationSignals {
   return {
     url: "https://example.com/page",
-    title: "Example",
     fields: [],
-    formCount: 0,
     resources: [],
     checkboxes: [],
     controls: [],
@@ -59,7 +56,7 @@ function signals(overrides: Partial<RawApplicationSignals> = {}): RawApplication
     sessionStorageKeys: 0,
     storageNote: "",
     permissions: [],
-    crossOriginFrames: 0,
+    frameCount: 0,
     truncated: [],
     ...overrides,
   };
@@ -78,6 +75,12 @@ describe("classifyField", () => {
   it("reads a cardholder name as payment, not as a name", () => {
     expect(classifyField(field({ autocomplete: "cc-name", label: "Name on card" }))).toBe("payment_card");
     expect(classifyField(field({ label: "First name" }))).toBe("full_name");
+  });
+
+  it("reads an email address as email, not as a postal address", () => {
+    expect(classifyField(field({ name: "email_address" }))).toBe("email");
+    expect(classifyField(field({ label: "Email address" }))).toBe("email");
+    expect(classifyField(field({ label: "Address line 1" }))).toBe("postal_address");
   });
 
   it("ignores inputs that collect nothing about the reader", () => {
@@ -106,12 +109,6 @@ describe("groupRequestedData", () => {
 });
 
 describe("third parties", () => {
-  it("approximates the registrable domain, including two-part suffixes", () => {
-    expect(registrableDomain("www.google-analytics.com")).toBe("google-analytics.com");
-    expect(registrableDomain("static.bbc.co.uk")).toBe("bbc.co.uk");
-    expect(registrableDomain("example.com")).toBe("example.com");
-  });
-
   it("drops first-party resources and puts recognised names first", () => {
     const parties = summarizeThirdParties(
       [
@@ -176,7 +173,7 @@ describe("contrast and de-emphasised exits", () => {
     expect(contrastRatio("currentColor", "rgb(255, 255, 255)")).toBeNull();
   });
 
-  it("measures how the way out compares with the accept action", () => {
+  it("measures the way out against the accept action beside it", () => {
     const hits = findDeemphasisedExits([
       control({ text: "Accept all", fontSizePx: 16, positionRatio: 0.2 }),
       control({
@@ -184,15 +181,14 @@ describe("contrast and de-emphasised exits", () => {
         kind: "link",
         fontSizePx: 10,
         color: "rgb(200, 200, 200)",
-        positionRatio: 0.96,
+        positionRatio: 0.22,
       }),
     ]);
 
     expect(hits).toHaveLength(1);
-    expect(hits[0].reasons).toHaveLength(3);
-    expect(hits[0].reasons[0]).toContain("10px text against 16px");
+    expect(hits[0].reasons).toHaveLength(2);
+    expect(hits[0].reasons[0]).toContain("10px text against 16px on “Accept all”");
     expect(hits[0].reasons[1]).toContain("contrast 1.7:1");
-    expect(hits[0].reasons[2]).toContain("96%");
   });
 
   it("says nothing when the way out is as prominent as the accept action", () => {
@@ -200,6 +196,34 @@ describe("contrast and de-emphasised exits", () => {
       findDeemphasisedExits([
         control({ text: "Accept all", fontSizePx: 16, positionRatio: 0.2 }),
         control({ text: "Reject all", fontSizePx: 16, positionRatio: 0.2 }),
+      ]),
+    ).toEqual([]);
+  });
+
+  /** A header "Sign up" and a footer "Unsubscribe" are not two answers to one question. */
+  it("leaves an ordinary footer link alone", () => {
+    expect(
+      findDeemphasisedExits([
+        control({ text: "Sign up", fontSizePx: 16, positionRatio: 0.02 }),
+        control({ text: "Unsubscribe", kind: "link", fontSizePx: 12, color: "rgb(153, 153, 153)", positionRatio: 0.98 }),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("still reports a lone exit that is both too small and too faint to read", () => {
+    const hits = findDeemphasisedExits([
+      control({ text: "Sign up", fontSizePx: 16, positionRatio: 0.02 }),
+      control({ text: "Unsubscribe", kind: "link", fontSizePx: 9, color: "rgb(200, 200, 200)", positionRatio: 0.98 }),
+    ]);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].reasons).toEqual(["9px text at contrast 1.7:1 — small and faint with nothing beside it to compare"]);
+  });
+
+  it("does not call an exit fainter when the accept beside it is just as faint", () => {
+    expect(
+      findDeemphasisedExits([
+        control({ text: "Accept all", fontSizePx: 14, color: "rgb(200, 200, 200)", positionRatio: 0.5 }),
+        control({ text: "Reject all", fontSizePx: 14, color: "rgb(200, 200, 200)", positionRatio: 0.5 }),
       ]),
     ).toEqual([]);
   });
@@ -225,9 +249,9 @@ describe("buildApplicationReport", () => {
       signals({
         resources: [{ kind: "script", url: "https://www.googletagmanager.com/gtm.js" }],
         checkboxes: [
-          { defaultChecked: true, checked: true, label: "Email me offers and updates", name: "marketing" },
-          { defaultChecked: true, checked: true, label: "Keep me signed in", name: "remember" },
-          { defaultChecked: false, checked: false, label: "I agree to the terms", name: "tos" },
+          { defaultChecked: true, label: "Email me offers and updates", name: "marketing" },
+          { defaultChecked: true, label: "Keep me signed in", name: "remember" },
+          { defaultChecked: false, label: "I agree to the terms", name: "tos" },
         ],
       }),
     );
@@ -245,9 +269,9 @@ describe("buildApplicationReport", () => {
     expect(plain?.evidence).toEqual([{ text: "Keep me signed in" }]);
   });
 
-  it("says what it could not see when frames are cross-origin or a permission name is unknown", () => {
+  it("says what it could not see when the page has frames or a permission name is unknown", () => {
     const report = buildApplicationReport(
-      signals({ crossOriginFrames: 2, permissions: [{ name: "camera", state: "unsupported" }] }),
+      signals({ frameCount: 2, permissions: [{ name: "camera", state: "unsupported" }] }),
     );
 
     expect(report.notChecked.map((entry) => entry.detail).join(" ")).toContain("2 frames");
