@@ -13,9 +13,9 @@ import { requestOutlineLabels, startInspect } from "../lib/messages";
 import type { TraceState } from "../lib/messages";
 import { getActiveTabId } from "../lib/active-tab";
 import { createTabStore, getCurrentTabId, onTabActivated, onTabClosed, onTabLoaded, onTabNavigated } from "../lib/tab-state";
-import { getSourceTracerUrl } from "../lib/provider";
+import { TRACER_STORAGE_KEYS, resolveTracerKeys } from "../lib/tracer";
 import { heuristicClaimType, splitSentences } from "../lib/claim-heuristics";
-import type { ContextSource, SourceContextReason, SourceQuality, VerifiedSource } from "../lib/source-tracer-client";
+import type { ContextSource, SourceContextReason, SourceQuality, TracedSource } from "../lib/tracer";
 import type {
   ClaimCard,
   ClaimType,
@@ -198,7 +198,7 @@ interface SavedInspection {
   error?: string;
   slop?: { report?: SlopReport; note?: string };
   sources?: {
-    sourcesByQuote: Record<string, VerifiedSource[]>;
+    sourcesByQuote: Record<string, TracedSource[]>;
     contextsByQuote: Record<string, ContextSource[]>;
     notCheckedByQuote: Record<string, string>;
   };
@@ -341,7 +341,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   let showRun = 0;
   /** Which tab's inspection the claims view is showing — what the page's badges must match. */
   let shownTabId: number | null = null;
-  /** Whether a Source Tracer endpoint is set, so cards don't claim to be checking when nothing will. */
+  /** Whether source tracing can run at all, so cards don't claim to be checking when nothing will. */
   let tracerConfigured = false;
   let pickTabId: number | null = null;
   /** The tab whose HT_SELECTION reports drive the Inspect selection button, and its last report. */
@@ -633,7 +633,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
 
   function renderVerifiedSources(
     quote: string,
-    sources: VerifiedSource[],
+    sources: TracedSource[],
     contexts: ContextSource[],
     notChecked?: string,
   ): void {
@@ -890,7 +890,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
       },
     });
 
-    tracerConfigured = (await getSourceTracerUrl()) !== null;
+    tracerConfigured = (await resolveTracerKeys(await chrome.storage.local.get([...TRACER_STORAGE_KEYS]))) !== null;
   }
 
   /** Takes the page out of pick mode, wherever it was armed. */
@@ -969,7 +969,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
       return;
     }
 
-    tracerConfigured = (await getSourceTracerUrl()) !== null;
+    tracerConfigured = (await resolveTracerKeys(await chrome.storage.local.get([...TRACER_STORAGE_KEYS]))) !== null;
     if (mine !== showRun) return;
 
     const pending = runs.get(tabId)?.record === record;

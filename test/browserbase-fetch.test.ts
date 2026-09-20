@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import type { CandidateSource } from "../src/source-candidates";
+import type { CandidateSource } from "../src/lib/tracer/source-candidates";
 
 const nativeFetch = globalThis.fetch;
 
@@ -7,9 +7,9 @@ afterEach(() => {
   globalThis.fetch = nativeFetch;
 });
 
-async function loadBrowserbase(): Promise<typeof import("../src/browserbase-fetch") | null> {
+async function loadBrowserbase(): Promise<typeof import("../src/lib/tracer/browserbase-fetch") | null> {
   try {
-    return await import("../src/browserbase-fetch");
+    return await import("../src/lib/tracer/browserbase-fetch");
   } catch {
     return null;
   }

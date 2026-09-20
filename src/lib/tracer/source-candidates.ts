@@ -1,3 +1,4 @@
+import type { SourceQuality } from "./types";
 export interface RawSearchResult {
   url: string;
   title: string;
@@ -12,7 +13,6 @@ export interface CandidateSource {
 }
 
 export type SourceContextReason = "page_context" | "non_factual_context";
-export type SourceQuality = "institutional_signal" | "credibility_unassessed";
 
 const MAX_CANDIDATES = 5;
 const TRACKING_PARAMETER = /^(utm_|fbclid$|gclid$|mc_[ce]id$)/i;

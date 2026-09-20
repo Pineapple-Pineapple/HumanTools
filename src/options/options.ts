@@ -1,13 +1,10 @@
 import type { Provider } from "../lib/types";
 import { selectedProvider } from "../lib/provider";
 
-type StoredKey = "openaiApiKey" | "openrouterApiKey" | "gptzeroApiKey" | "sourceTracerUrl";
+type StoredKey = "openaiApiKey" | "openrouterApiKey" | "gptzeroApiKey" | "braveSearchApiKey" | "browserbaseApiKey";
 
-const STORED_KEYS: StoredKey[] = ["openaiApiKey", "openrouterApiKey", "gptzeroApiKey", "sourceTracerUrl"];
+const STORED_KEYS: StoredKey[] = ["openaiApiKey", "openrouterApiKey", "gptzeroApiKey", "braveSearchApiKey", "browserbaseApiKey"];
 const PROVIDERS: Provider[] = ["openai", "openrouter"];
-
-const TRACER_SETUP_URL =
-  "https://github.com/Pineapple-Pineapple/HumanTools/blob/main/GETTING-STARTED.md#7-optional-the-source-tracer-worker";
 
 const INPUT_CLASS = "w-full bg-neutral-800 border border-neutral-600 rounded px-2 py-1.5 text-neutral-100";
 const LABEL_CLASS = "text-sm text-neutral-300";
@@ -215,18 +212,29 @@ const gptzeroField = field({
 });
 gptzeroField.el.classList.add("pt-3", "border-t", "border-neutral-800");
 
-const sourceTracerField = field({
-  key: "sourceTracerUrl",
-  label: "Source Tracer endpoint (optional)",
-  type: "url",
-  placeholder: "https://…workers.dev/v1/trace",
+const braveField = field({
+  key: "braveSearchApiKey",
+  label: "Brave Search API key (optional)",
+  type: "password",
   hint: [
-    "There is no shared Source Tracer service: this is the URL of a Cloudflare Worker you deploy yourself, following the ",
-    link(TRACER_SETUP_URL, "Source Tracer Worker section of GETTING-STARTED.md"),
-    ". Search and browsing credentials live on that Worker, not in this extension. Without it, Inspector still works but external sources show “Not checked”.",
+    "Lets the Inspector look for a claim's sources outside the page. It searches for the claim's exact quote, opens the results, and keeps only pages where that quote is really present. Get one from the ",
+    link("https://api-dashboard.search.brave.com/", "Brave Search API dashboard"),
+    ". Without it, external sources read “Not checked” and nothing is searched.",
   ],
 });
-sourceTracerField.el.classList.add("pt-3", "border-t", "border-neutral-800");
+braveField.el.classList.add("pt-3", "border-t", "border-neutral-800");
+
+const browserbaseField = field({
+  key: "browserbaseApiKey",
+  label: "Browserbase API key (optional)",
+  type: "password",
+  hint: [
+    "Only used alongside a Brave key. Candidate pages are opened in a cloud browser instead of fetched directly, which reads pages that build their text with script and keeps your address off them. Get one from ",
+    link("https://www.browserbase.com/", "browserbase.com"),
+    ". Without it, pages are fetched straight from here: faster and free, but a script-rendered page arrives empty and simply fails to verify.",
+  ],
+});
+browserbaseField.el.classList.add("pt-3", "border-t", "border-neutral-800");
 
 const saveBtn = el(
   "button",
@@ -238,7 +246,7 @@ saveBtn.type = "button";
 const statusEl = el("p", `${HINT_CLASS} min-h-[1em]`);
 statusEl.setAttribute("role", "status");
 
-app.append(heading, note, providerSet, gptzeroField.el, sourceTracerField.el, saveBtn, statusEl);
+app.append(heading, note, providerSet, gptzeroField.el, braveField.el, browserbaseField.el, saveBtn, statusEl);
 
 // ---------------------------------------------------------------------------------------------
 // Load and save
@@ -248,7 +256,8 @@ const inputs: Record<StoredKey, HTMLInputElement> = {
   openaiApiKey: providerRows.openai.input,
   openrouterApiKey: providerRows.openrouter.input,
   gptzeroApiKey: gptzeroField.input,
-  sourceTracerUrl: sourceTracerField.input,
+  braveSearchApiKey: braveField.input,
+  browserbaseApiKey: browserbaseField.input,
 };
 
 /** What storage held when the page loaded (or last saved), so Save can write only what changed. */
@@ -284,12 +293,6 @@ saveBtn.addEventListener("click", async () => {
     string
   >;
 
-  // provider.ts ignores anything that isn't https, which would otherwise fail silently as "Not checked".
-  if (values.sourceTracerUrl && !values.sourceTracerUrl.startsWith("https://")) {
-    statusEl.textContent = "Not saved: the Source Tracer endpoint must start with https://.";
-    sourceTracerField.input.focus();
-    return;
-  }
 
   // With exactly one key filled in, that provider is the only one that can work, whatever the radio says.
   const keyed = PROVIDERS.filter((p) => values[`${p}ApiKey`]);

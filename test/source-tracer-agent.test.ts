@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { CandidateSource } from "../src/source-candidates";
+import type { CandidateSource } from "../src/lib/tracer/source-candidates";
 
-async function loadTracer(): Promise<typeof import("../src/source-tracer-agent") | null> {
+async function loadTracer(): Promise<typeof import("../src/lib/tracer/source-tracer-agent") | null> {
   try {
-    return await import("../src/source-tracer-agent");
+    return await import("../src/lib/tracer/source-tracer-agent");
   } catch {
     return null;
   }

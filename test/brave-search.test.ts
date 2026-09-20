@@ -6,9 +6,9 @@ afterEach(() => {
   globalThis.fetch = nativeFetch;
 });
 
-async function loadBraveSearch(): Promise<typeof import("../src/brave-search") | null> {
+async function loadBraveSearch(): Promise<typeof import("../src/lib/tracer/brave-search") | null> {
   try {
-    return await import("../src/brave-search");
+    return await import("../src/lib/tracer/brave-search");
   } catch {
     return null;
   }

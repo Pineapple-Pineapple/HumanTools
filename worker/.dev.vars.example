@@ -1,5 +1,0 @@
-# Local development: copy to .dev.vars (gitignored). In production each is a Worker secret:
-#   wrangler secret put BRAVE_SEARCH_API_KEY
-#   wrangler secret put BROWSERBASE_API_KEY
-BRAVE_SEARCH_API_KEY=
-BROWSERBASE_API_KEY=

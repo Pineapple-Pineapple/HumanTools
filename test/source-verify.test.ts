@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-async function loadVerifier(): Promise<typeof import("../src/source-verify") | null> {
+async function loadVerifier(): Promise<typeof import("../src/lib/tracer/source-verify") | null> {
   try {
-    return await import("../src/source-verify");
+    return await import("../src/lib/tracer/source-verify");
   } catch {
     return null;
   }

@@ -40,9 +40,3 @@ export async function hasApiKey(): Promise<boolean> {
   const stored = await chrome.storage.local.get([...PROVIDER_STORAGE_KEYS]);
   return resolveProvider(stored) !== null;
 }
-
-/** The configured Source Tracer endpoint, or null when it's unset or not https. */
-export async function getSourceTracerUrl(): Promise<string | null> {
-  const { sourceTracerUrl } = await chrome.storage.local.get("sourceTracerUrl");
-  return typeof sourceTracerUrl === "string" && sourceTracerUrl.startsWith("https://") ? sourceTracerUrl : null;
-}

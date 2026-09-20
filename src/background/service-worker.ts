@@ -15,9 +15,9 @@ import type { Block, ClaimCard, InspectTarget, OutlineLabel, Provider, RewriteFo
 import { fnv1a } from "../lib/hash";
 import { parseOutlineLabels, parseSlopResponse, validateClaims } from "../lib/inspect-validate";
 import type { ClaimValidation } from "../lib/inspect-validate";
-import { requestSourceTrace } from "../lib/source-tracer-client";
-import type { ContextSource, VerifiedSource } from "../lib/source-tracer-client";
-import { PROVIDER_STORAGE_KEYS, getSourceTracerUrl, resolveProvider, selectedProvider } from "../lib/provider";
+import { NO_SEARCH_KEY, TRACER_STORAGE_KEYS, resolveTracerKeys, traceSources } from "../lib/tracer";
+import type { ContextSource, TracedSource } from "../lib/tracer";
+import { PROVIDER_STORAGE_KEYS, resolveProvider, selectedProvider } from "../lib/provider";
 import { SseParser, chatDelta } from "../lib/sse";
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -27,7 +27,6 @@ chrome.runtime.onInstalled.addListener(() => {
 const MAX_CONCURRENT = 4;
 const MODEL_TIMEOUT_MS = 30_000;
 
-const NO_TRACER_ENDPOINT = "No Source Tracer endpoint set in Settings.";
 
 const PROVIDERS: Record<Provider, { url: string; model: string; label: string }> = {
   openai: { url: "https://api.openai.com/v1/chat/completions", model: "gpt-4o-mini", label: "OpenAI" },
@@ -51,7 +50,7 @@ const outlineCache = new Map<string, { id: string; label: OutlineLabel }[]>();
 /** GPTZero has no prompt or provider, so its key is the scored text alone. */
 const slopCache = new Map<string, SlopReport>();
 /** Keyed by endpoint and request; the Worker's answer depends on the page URL, not just the quote. */
-const sourceCache = new Map<string, { sources: VerifiedSource[]; contexts: ContextSource[] }>();
+const sourceCache = new Map<string, { sources: TracedSource[]; contexts: ContextSource[] }>();
 
 /** What a request needs to reach the reader's chosen model. `signal` aborts when the panel's port closes. */
 interface ModelAccess {
@@ -394,30 +393,26 @@ async function handleInspectRequest(
   }
 
   async function runSourceTracer(claims: ClaimCard[]): Promise<void> {
-    const sourceTracerUrl = await getSourceTracerUrl();
-    const sourcesByQuote: Record<string, VerifiedSource[]> = {};
+    const keys = await resolveTracerKeys(await chrome.storage.local.get([...TRACER_STORAGE_KEYS]));
+    const sourcesByQuote: Record<string, TracedSource[]> = {};
     const contextsByQuote: Record<string, ContextSource[]> = {};
     const notCheckedByQuote: Record<string, string> = {};
-    if (!sourceTracerUrl) {
-      trace("Source Tracer", "skipped", NO_TRACER_ENDPOINT);
+    if (!keys) {
+      trace("Source Tracer", "skipped", NO_SEARCH_KEY);
       for (const claim of claims) {
         sourcesByQuote[claim.verifiedQuote] = [];
         contextsByQuote[claim.verifiedQuote] = [];
-        notCheckedByQuote[claim.verifiedQuote] = NO_TRACER_ENDPOINT;
+        notCheckedByQuote[claim.verifiedQuote] = NO_SEARCH_KEY;
       }
       post({ type: "INSPECT_SOURCES", sourcesByQuote, contextsByQuote, notCheckedByQuote });
       return;
     }
 
-    const stored = await chrome.storage.local.get("sourceTracerInstallId");
-    const installId = typeof stored.sourceTracerInstallId === "string" ? stored.sourceTracerInstallId : crypto.randomUUID();
-    if (installId !== stored.sourceTracerInstallId) await chrome.storage.local.set({ sourceTracerInstallId: installId });
-
     // Steps are keyed by name in the panel, so each claim's rows carry its card number.
     await runPool(claims.map((claim, i) => ({ claim, n: i + 1 })), signal, async ({ claim, n }) => {
       const step = (name: string) => `${name} · claim ${n}`;
       const request = { claim: claim.claim, verifiedQuote: claim.verifiedQuote, page: { url: target.url, title: target.title } };
-      const cacheKey = `${sourceTracerUrl}:${fnv1a(JSON.stringify(request))}`;
+      const cacheKey = `${keys.browserbase ? "bb" : "direct"}:${fnv1a(JSON.stringify(request))}`;
       const cached = sourceCache.get(cacheKey);
       if (cached) {
         sourcesByQuote[claim.verifiedQuote] = cached.sources;
@@ -426,12 +421,7 @@ async function handleInspectRequest(
         return;
       }
       try {
-        const result = await requestSourceTrace(
-          sourceTracerUrl,
-          { ...request, installId },
-          (event) => trace(step(event.step), event.state, event.detail, event.ms),
-          signal,
-        );
+        const result = await traceSources(keys, request, (event) => trace(step(event.step), event.state, event.detail, event.ms), signal);
         sourceCache.set(cacheKey, { sources: result.sources, contexts: result.contexts });
         sourcesByQuote[claim.verifiedQuote] = result.sources;
         contextsByQuote[claim.verifiedQuote] = result.contexts;
@@ -445,6 +435,7 @@ async function handleInspectRequest(
     });
     post({ type: "INSPECT_SOURCES", sourcesByQuote, contextsByQuote, notCheckedByQuote });
   }
+
 
   async function runSlop(): Promise<void> {
     const step = "Slop Check (GPTZero)";
