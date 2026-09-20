@@ -504,6 +504,13 @@ export function markClaims(blockId: string | null, claims: { n: number; quote: s
     found.push({ n: claim.n, status: claim.status, at, start: positions[at], end: { node: last.node, offset: last.offset + 1 } });
   }
 
+  // After a reload the stamped id is gone and the whole body was searched. Put the id back on the
+  // block holding the first match, so "Show on page" can find it again without re-inspecting.
+  if (blockId && root === document.body && found.length) {
+    const BLOCKS = "p, li, blockquote, dd, dt, td, th, figcaption, h1, h2, h3, h4, h5, h6, pre";
+    found[0].start.node.parentElement?.closest(BLOCKS)?.setAttribute("data-ht-inspect-id", blockId);
+  }
+
   const ranges = found.map((f) => {
     const r = document.createRange();
     r.setStart(f.start.node, f.start.offset);
