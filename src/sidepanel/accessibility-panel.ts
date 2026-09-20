@@ -21,8 +21,9 @@ function pageAccessError(err: unknown): string {
 
 interface AccessibilityPanelEls {
   root: HTMLElement;
-  analyzeBtn: HTMLButtonElement;
+  gradeNumber: HTMLElement;
   gradeReadout: HTMLElement;
+  gradeChange: HTMLElement;
   gradeSlider: HTMLInputElement;
   gradeValue: HTMLElement;
   bulletsCheckbox: HTMLInputElement;
@@ -40,19 +41,24 @@ function renderAccessibilityPanel(container: HTMLElement): AccessibilityPanelEls
   heading.textContent = "Accessibility — make this understandable";
   heading.className = "text-neutral-100 font-medium";
 
+  // The panel's headline. Scoring is local and free, so the number is read off the page as soon as
+  // the panel is shown rather than waiting to be asked for.
   const analyzeGroup = document.createElement("div");
-  analyzeGroup.className = "flex flex-col gap-2";
+  analyzeGroup.className = "flex flex-col gap-0.5";
 
-  const analyzeBtn = document.createElement("button");
-  analyzeBtn.textContent = "Analyze this page";
-  analyzeBtn.className =
-    "self-start px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 border border-neutral-600 rounded text-neutral-100";
+  const gradeNumber = document.createElement("div");
+  gradeNumber.className = "text-3xl leading-none font-semibold text-neutral-100 tabular-nums";
+  gradeNumber.textContent = "—";
 
   const gradeReadout = document.createElement("p");
-  gradeReadout.className = "text-neutral-400";
-  gradeReadout.textContent = "Reading grade: —";
+  gradeReadout.className = "text-[11px] uppercase tracking-wide text-neutral-400";
+  gradeReadout.textContent = "Reading grade";
 
-  analyzeGroup.append(analyzeBtn, gradeReadout);
+  const gradeChange = document.createElement("p");
+  gradeChange.className = "text-xs text-amber-400";
+  gradeChange.hidden = true;
+
+  analyzeGroup.append(gradeNumber, gradeReadout, gradeChange);
 
   const rewriteGroup = document.createElement("div");
   rewriteGroup.className = "flex flex-col gap-3 pt-3 border-t border-neutral-800";
@@ -79,7 +85,7 @@ function renderAccessibilityPanel(container: HTMLElement): AccessibilityPanelEls
   gradeSlider.className = "w-full accent-amber-600";
 
   const ticksRow = document.createElement("div");
-  ticksRow.className = "flex justify-between text-xs text-neutral-500 px-0.5";
+  ticksRow.className = "flex justify-between text-xs text-muted px-0.5";
   for (const grade of GRADE_STEPS) {
     const tick = document.createElement("span");
     tick.textContent = String(grade);
@@ -113,7 +119,7 @@ function renderAccessibilityPanel(container: HTMLElement): AccessibilityPanelEls
   actionRow.append(rewriteBtn, restoreBtn);
 
   const status = document.createElement("p");
-  status.className = "text-xs text-neutral-500 min-h-[1em]";
+  status.className = "text-xs text-muted min-h-[1em]";
 
   const optionsLink = document.createElement("button");
   optionsLink.textContent = "Set API key";
@@ -125,8 +131,9 @@ function renderAccessibilityPanel(container: HTMLElement): AccessibilityPanelEls
 
   return {
     root,
-    analyzeBtn,
+    gradeNumber,
     gradeReadout,
+    gradeChange,
     gradeSlider,
     gradeValue,
     bulletsCheckbox,
@@ -148,6 +155,8 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
   interface TabAnalysis {
     pageModel: PageModel;
     grade: number;
+    /** What the page scored before a rewrite, so the readout can show what the rewrite moved. */
+    originalGrade?: number;
     /** Whether this tab's page has rewrites applied — what "Restore original" hangs off. */
     rewritten: boolean;
     /** A rewrite is streaming into this tab; its controls stay locked until it finishes. */
@@ -172,7 +181,8 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
   function render(tabId: number | null): void {
     const analysis = analyses.get(tabId);
     if (!analysis) {
-      els.gradeReadout.textContent = "Reading grade: —";
+      els.gradeNumber.textContent = "—";
+      els.gradeChange.hidden = true;
       els.gradeSlider.disabled = true;
       els.bulletsCheckbox.disabled = true;
       els.rewriteBtn.disabled = true;
@@ -180,7 +190,10 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
       els.status.textContent = "";
       return;
     }
-    els.gradeReadout.textContent = `Reading grade: ${analysis.grade}`;
+    els.gradeNumber.textContent = String(analysis.grade);
+    const moved = analysis.rewritten && analysis.originalGrade !== undefined && analysis.originalGrade !== analysis.grade;
+    els.gradeChange.hidden = !moved;
+    if (moved) els.gradeChange.textContent = `was ${analysis.originalGrade} before the rewrite`;
     els.gradeSlider.disabled = analysis.rewriting;
     els.bulletsCheckbox.disabled = analysis.rewriting;
     els.restoreBtn.hidden = !analysis.rewritten;
@@ -211,10 +224,7 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
    */
   async function analyze(tabId: number): Promise<void> {
     const myRun = ++analyzeRun;
-    if (isCurrentTab(tabId)) {
-      els.status.textContent = "Analyzing…";
-      els.analyzeBtn.disabled = true;
-    }
+    if (isCurrentTab(tabId)) els.status.textContent = "Reading this page…";
     try {
       const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: extractPageBlocks });
       if (myRun !== analyzeRun) return;
@@ -234,6 +244,7 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
       analyses.set(tabId, {
         pageModel,
         grade,
+        originalGrade: previous?.originalGrade,
         rewritten: previous?.rewritten ?? false,
         rewriting: previous?.rewriting ?? false,
         status: previous?.rewriting
@@ -245,8 +256,22 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
       if (isCurrentTab(tabId)) render(tabId);
     } catch (err) {
       if (myRun === analyzeRun && isCurrentTab(tabId)) els.status.textContent = pageAccessError(err);
-    } finally {
-      if (myRun === analyzeRun) els.analyzeBtn.disabled = false;
+    }
+  }
+
+  /**
+   * Rescores the page in place after something changed it, leaving status and rewrite state alone.
+   * Rewrites replace a paragraph's contents without adding or removing a `p`, so re-extracting
+   * stamps the same block ids back onto the same elements and a later Rewrite still lands.
+   */
+  async function regrade(tabId: number): Promise<void> {
+    try {
+      const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: extractPageBlocks });
+      const pageModel = result ?? null;
+      if (!pageModel || pageModel.blocks.length === 0) return;
+      update(tabId, { pageModel, grade: computeFleschKincaidGrade(pageModel.blocks.map((b) => b.text).join(" ")) });
+    } catch {
+      // The grade is a readout, not a result. A page that cannot be re-read keeps the number it had.
     }
   }
 
@@ -262,14 +287,6 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
     const relevant = "openaiApiKey" in changes || "openrouterApiKey" in changes || "provider" in changes;
     if (area !== "local" || !relevant) return;
     void refreshRewriteButton(getCurrentTabId());
-  });
-
-  els.analyzeBtn.addEventListener("click", async () => {
-    try {
-      await analyze(getCurrentTabId() ?? (await getActiveTabId()));
-    } catch (err) {
-      els.status.textContent = pageAccessError(err);
-    }
   });
 
   els.rewriteBtn.addEventListener("click", async () => {
@@ -289,7 +306,7 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
     }
 
     const total = analysis.pageModel.blocks.length;
-    update(tabId, { rewriting: true, status: `Rewriting… 0/${total} paragraphs` });
+    update(tabId, { rewriting: true, originalGrade: analysis.grade, status: `Rewriting… 0/${total} paragraphs` });
 
     startRewrite(analysis.pageModel.blocks, grade, format, {
       onProgress: (msg) => {
@@ -314,6 +331,8 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
         update(tabId, { status: `Rewriting… ${msg.done}/${msg.total} paragraphs` });
       },
       onDone: (msg) => {
+        // The page says something different now, so the number describing it is recomputed.
+        void regrade(tabId);
         update(tabId, {
           rewriting: false,
           status:
@@ -323,6 +342,8 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
         });
       },
       onFatalError: (msg) => {
+        // Whatever landed before the failure is still on the page and still counts.
+        void regrade(tabId);
         update(tabId, { rewriting: false, status: msg.message });
       },
     });
@@ -337,8 +358,10 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
     }
     try {
       const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: restoreOriginal });
+      void regrade(tabId);
       update(tabId, {
         rewritten: false,
+        originalGrade: undefined,
         status: result
           ? `Original text restored in ${result} paragraph${result === 1 ? "" : "s"}.`
           : "Nothing to restore — the page has changed since it was rewritten.",
@@ -359,5 +382,14 @@ export function mountAccessibilityPanel(container: HTMLElement): void {
     // tab-state has already dropped this tab's analysis: its block ids belong to a page that left.
     render(tabId);
     whenVisible(container, () => void analyze(tabId));
+  });
+
+  // Tab events only fire once something moves, so the tab the panel opened over would otherwise sit
+  // at an empty readout until the reader switched away and back. Score it as soon as it is on screen.
+  whenVisible(container, () => {
+    void (async () => {
+      const tabId = getCurrentTabId() ?? (await getActiveTabId());
+      if (!analyses.get(tabId)) await analyze(tabId);
+    })();
   });
 }
