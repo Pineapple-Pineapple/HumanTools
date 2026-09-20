@@ -24,7 +24,6 @@ import {
   RESOLVE_DISCLOSURE,
 } from "../lib/link-resolver";
 import type { FlaggedLink, LinkResolution } from "../lib/link-resolver";
-import type { Limit } from "../lib/limits";
 import { emptyFindingsMessage, findingsSummary, groupAsks, readSecuritySignals } from "../lib/security-heuristics";
 import type { AskGroup } from "../lib/security-heuristics";
 import type { Finding, SecurityReading, SecuritySignals, SensitiveAsk, Severity } from "../lib/security-heuristics";
@@ -43,6 +42,7 @@ import {
   SECTION_LABEL,
   SMALL_BTN,
   STATUS,
+  renderLimits,
 } from "./ui";
 
 const SEVERITY_LABEL: Record<Severity, string> = {
@@ -227,23 +227,6 @@ function renderAsks(asks: readonly SensitiveAsk[], showForm: (group: AskGroup) =
 }
 
 /** The limits, as chips. Each keeps its full sentence as the thing it says on hover. */
-function renderLimits(limits: readonly Limit[]): HTMLElement {
-  const wrap = el("div", "flex flex-col gap-1.5");
-  wrap.append(el("div", SECTION_LABEL, "Blind spots"));
-  const strip = el("div", "flex flex-wrap gap-1.5");
-  for (const entry of limits) {
-    const chip = el(
-      "span",
-      "inline-flex items-center px-1.5 py-0.5 rounded border border-dashed border-neutral-600 text-neutral-400 text-[11px] leading-snug",
-      entry.label,
-    );
-    chip.title = entry.detail;
-    strip.appendChild(chip);
-  }
-  wrap.appendChild(strip);
-  return wrap;
-}
-
 // ---- The two checks that reach the network -----------------------------------------------------
 // Both are buttons and only buttons. Nothing below is called by the scan, and each one prints what
 // it will send, and to whom, above the control that sends it. Results are attributed to the network

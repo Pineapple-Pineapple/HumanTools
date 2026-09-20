@@ -1,3 +1,5 @@
+import type { Limit } from "../lib/limits";
+
 /**
  * The side panel's shared DOM helper, error wording, and visual vocabulary.
  *
@@ -52,3 +54,23 @@ export const LINK_BTN = "self-start text-xs text-amber-500 hover:underline";
 export const CHIP = "inline-flex items-center px-1.5 py-0.5 rounded border text-[11px] leading-none";
 export const NEUTRAL_CHIP = `${CHIP} bg-neutral-800 text-neutral-300 border-neutral-600`;
 export const ATTENTION_CHIP = `${CHIP} bg-amber-950 text-amber-300 border-amber-800`;
+const LIMIT_CHIP =
+  "inline-flex items-center px-1.5 py-0.5 rounded border border-dashed border-neutral-600 text-neutral-400 text-[11px] leading-snug";
+
+/**
+ * A panel's "Blind spots": every limit as a chip whose full sentence is the hover text. The short
+ * label gets the disclosure onto the screen at all; the detail is the honest version and is never
+ * dropped. Shared so every panel admits its limits in the same shape.
+ */
+export function renderLimits(limits: readonly Limit[], className = "flex flex-col gap-1.5"): HTMLElement {
+  const wrap = el("div", className);
+  wrap.append(el("div", SECTION_LABEL, "Blind spots"));
+  const strip = el("div", "flex flex-wrap gap-1.5");
+  for (const entry of limits) {
+    const chip = el("span", LIMIT_CHIP, entry.label);
+    chip.title = entry.detail;
+    strip.appendChild(chip);
+  }
+  wrap.appendChild(strip);
+  return wrap;
+}

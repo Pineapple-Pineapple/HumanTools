@@ -2,10 +2,9 @@ import { collectApplicationSignals } from "../content/application-signals";
 import { getActiveTabId } from "../lib/active-tab";
 import { buildApplicationReport } from "../lib/application-heuristics";
 import type { ApplicationReport, ApplicationSection, Finding, RawApplicationSignals } from "../lib/application-heuristics";
-import type { Limit } from "../lib/limits";
 import { createTabStore, getCurrentTabId, onTabActivated, onTabNavigated } from "../lib/tab-state";
 import { whenVisible } from "../lib/panel-visibility";
-import { BTN, el, H1, pageAccessError, SECTION_LABEL, STATUS } from "./ui";
+import { BTN, el, H1, pageAccessError, STATUS, renderLimits } from "./ui";
 
 const BASIS_LABEL: Record<Finding["basis"], string> = {
   observed: "Read off the page",
@@ -80,23 +79,6 @@ function renderSection(section: ApplicationSection, first: boolean): HTMLElement
 }
 
 /** The limits, as a strip of chips. Each one keeps its full sentence as the thing it says on hover. */
-function renderLimits(limits: readonly Limit[]): HTMLElement {
-  const wrap = el("div", "flex flex-col gap-1.5 pt-3 border-t border-neutral-800");
-  wrap.append(el("div", SECTION_LABEL, "Blind spots"));
-  const strip = el("div", "flex flex-wrap gap-1.5");
-  for (const entry of limits) {
-    const chip = el(
-      "span",
-      "inline-flex items-center px-1.5 py-0.5 rounded border border-dashed border-neutral-600 text-neutral-400 text-[11px] leading-snug",
-      entry.label,
-    );
-    chip.title = entry.detail;
-    strip.appendChild(chip);
-  }
-  wrap.appendChild(strip);
-  return wrap;
-}
-
 function looksLikeSignals(value: unknown): value is RawApplicationSignals {
   const candidate = value as RawApplicationSignals | null;
   return (
@@ -205,7 +187,7 @@ export function mountApplicationPanel(container: HTMLElement): void {
     label.replaceChildren(head, meta, ...bands, basis);
     label.hidden = false;
 
-    limitsWrap.replaceChildren(renderLimits(report.notChecked));
+    limitsWrap.replaceChildren(renderLimits(report.notChecked, "flex flex-col gap-1.5 pt-3 border-t border-neutral-800"));
     limitsWrap.append(
       el(
         "p",
