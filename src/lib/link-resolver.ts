@@ -16,7 +16,7 @@
  * a network call.
  */
 
-import { effectiveDomain, hasPunycodeLabel, hostFromLinkText, isUrlShortener } from "./security-heuristics";
+import { effectiveDomain, hasPunycodeLabel, isUrlShortener, linkClaim } from "./security-heuristics";
 import type { LinkSignal, SecuritySignals } from "./security-heuristics";
 
 export const RESOLVE_TIMEOUT_MS = 10_000;
@@ -46,7 +46,7 @@ export type LinkResolution =
 
 // ---- Which links are worth offering to follow ---------------------------------------------------
 
-export type FlagReason = "text_mismatch" | "punycode" | "shortener";
+export type FlagReason = "text_mismatch" | "punycode" | "shortener" | "wrapped";
 
 export interface FlaggedLink {
   href: string;
@@ -62,25 +62,28 @@ const REASON_LABEL: Record<FlagReason, string> = {
   text_mismatch: "shows one address, points at another",
   punycode: "encoded internationalized hostname",
   shortener: "shortening service",
+  wrapped: "goes through another address first",
 };
 
 /** Worst-first, so a link flagged for two reasons is offered under the one that matters more. */
-const REASON_RANK: Record<FlagReason, number> = { text_mismatch: 0, punycode: 1, shortener: 2 };
+const REASON_RANK: Record<FlagReason, number> = { text_mismatch: 0, punycode: 1, shortener: 2, wrapped: 3 };
 
 function reasonFor(link: LinkSignal): FlagReason | null {
   const host = link.hostname.toLowerCase();
   if (!host) return null;
-  const claimed = hostFromLinkText(link.text);
-  if (claimed && effectiveDomain(claimed) !== effectiveDomain(host)) return "text_mismatch";
+  const claim = linkClaim(link);
+  if (claim === "mismatch") return "text_mismatch";
   if (hasPunycodeLabel(host)) return "punycode";
   if (isUrlShortener(host)) return "shortener";
+  if (claim === "wrapped") return "wrapped";
   return null;
 }
 
 /**
  * The links the scan already had something to say about: a destination the text disagrees with, an
- * encoded name, or a shortener. Only these get a button — a page's other four hundred links are not
- * something a reader should be invited to fire requests at one at a time.
+ * encoded name, a shortener, or a wrapper carrying the address it names. Only these get a button —
+ * a page's other four hundred links are not something a reader should be invited to fire requests
+ * at one at a time.
  */
 export function resolvableLinks(signals: SecuritySignals, frames: readonly SecuritySignals[] = []): FlaggedLink[] {
   const documents: { signals: SecuritySignals; frameUrl: string }[] = [
@@ -157,7 +160,7 @@ const METHOD_REJECTED = new Set([400, 403, 405, 501]);
 
 /**
  * Follows one link and reports where it stopped. HEAD first — it asks for headers and no body, so a
- * phishing page is not downloaded — with GET as the fallback for servers that refuse HEAD outright.
+ * phishing page is not downloaded — with GET as the fallback when HEAD is refused or fails outright.
  * Cookies and referrer are withheld; the request carries the address and nothing about this page.
  */
 export async function resolveLink(
@@ -200,7 +203,7 @@ export async function resolveLink(
 // the network results too.
 
 export const RESOLVE_DISCLOSURE =
-  "Pressing one of these asks that address for the link from your own IP address, following redirects — once for the headers, and a second time for the page itself if that server refuses the first. No cookies and no referring page are sent, but the requests are real: on a tracking shortener this is close to indistinguishable from clicking the link and may count as a visit, and on a link built to catch someone it tells whoever runs it that this link is being looked at, and roughly from where. Only the address it finally lands on comes back — the hops in between cannot be read from here.";
+  "Pressing one of these asks that address for the link from your own IP address, following redirects — once for the headers only, and a second time for the page itself if the first is refused or fails. No cookies and no referring page are sent, but the requests are real: on a tracking shortener this is close to indistinguishable from clicking the link and may count as a visit, and on a link built to catch someone it tells whoever runs it that this link is being looked at, and roughly from where. Only the address it finally lands on comes back — the hops in between cannot be read from here.";
 
 /** The one-line version under each button, naming the host that specific press contacts. */
 export function resolveDisclosure(href: string): string {

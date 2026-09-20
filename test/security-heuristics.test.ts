@@ -9,6 +9,7 @@ import {
   hasPunycodeLabel,
   hostFromLinkText,
   isUrlShortener,
+  linkClaim,
   readSecuritySignals,
 } from "../src/lib/security-heuristics";
 import type { FieldSignal, FormSignal, LinkSignal, SecuritySignals } from "../src/lib/security-heuristics";
@@ -25,10 +26,8 @@ function field(partial: Partial<FieldSignal> = {}): FieldSignal {
 function form(partial: Partial<FormSignal> = {}): FormSignal {
   return {
     label: "Form 1",
-    method: "post",
     action: "https://example.com/submit",
     actionRaw: "/submit",
-    hasActionAttribute: true,
     formActions: [],
     fields: [],
     fieldsTruncated: false,
@@ -55,7 +54,6 @@ function signals(partial: Partial<SecuritySignals> = {}): SecuritySignals {
     origin: "https://example.com",
     protocol: "https:",
     hostname: "example.com",
-    title: "An article",
     forms: [],
     formsTruncated: false,
     looseSensitiveFields: [],
@@ -67,7 +65,6 @@ function signals(partial: Partial<SecuritySignals> = {}): SecuritySignals {
     mixedContent: [],
     mixedContentTruncated: false,
     frameCount: 0,
-    notCollected: [],
     ...partial,
   };
 }
@@ -105,7 +102,7 @@ describe("a page with nothing wrong", () => {
    */
   it("does not keep a limitation that no longer holds", () => {
     const text = details(reading.notChecked).toLowerCase();
-    for (const gone of ["certificate", "padlock", "cross-origin frame", "shadow root", "canvas", "short built-in suffix", "not decoded", "who owns this domain"]) {
+    for (const gone of ["certificate", "padlock", "cross-origin frame", "open shadow root", "canvas", "short built-in suffix", "not decoded", "who owns this domain", "named window"]) {
       expect(text).not.toContain(gone);
     }
   });
@@ -220,7 +217,8 @@ describe("link deception", () => {
       }),
     );
     const finding = reading.findings.find((f) => f.kind === "link_text_mismatch");
-    expect(finding?.severity).toBe("high");
+    // Medium: from markup alone this is "look before you click", not proof of a trap.
+    expect(finding?.severity).toBe("medium");
     expect(finding?.evidence[0]).toBe("“www.yourbank.com” → secure-login.cc");
   });
 
@@ -229,6 +227,42 @@ describe("link deception", () => {
       signals({ links: [link({ text: "bbc.co.uk", href: "https://www.bbc.co.uk/news", hostname: "www.bbc.co.uk" })], linkCount: 1 }),
     );
     expect(reading.findings.map((f) => f.kind)).not.toContain("link_text_mismatch");
+    expect(reading.findings.map((f) => f.kind)).not.toContain("link_wrapped");
+  });
+
+  /** The aggregator and newsletter case: the address carries the site the text names. */
+  it("reads a redirector that carries its destination as a wrapper, not a disguise", () => {
+    const reading = readSecuritySignals(
+      signals({
+        links: [
+          link({ text: "example.org", href: "https://go.redirectingat.com/?url=https%3A%2F%2Fwww.example.org%2Fstory", hostname: "go.redirectingat.com" }),
+          link({ text: "example.org", href: "https://news.ycombinator.com/from?site=example.org", hostname: "news.ycombinator.com" }),
+        ],
+        linkCount: 2,
+      }),
+    );
+    const kinds = reading.findings.map((f) => f.kind);
+    expect(kinds).not.toContain("link_text_mismatch");
+    const wrapped = reading.findings.find((f) => f.kind === "link_wrapped");
+    expect(wrapped?.severity).toBe("low");
+    expect(wrapped?.evidence).toHaveLength(2);
+  });
+
+  it("does not let a look-alike name in the address vouch for the one in the text", () => {
+    expect(
+      linkClaim(link({ text: "example.com", href: "https://t.example.net/?u=https://notexample.com/x", hostname: "t.example.net" })),
+    ).toBe("mismatch");
+    expect(
+      linkClaim(link({ text: "example.com", href: "https://t.example.net/?u=https://www.example.com/x", hostname: "t.example.net" })),
+    ).toBe("wrapped");
+    expect(linkClaim(link({ text: "Read more" }))).toBeNull();
+  });
+
+  it("treats address-shaped text on a non-web link as a mismatch and names the target", () => {
+    const reading = readSecuritySignals(
+      signals({ links: [link({ text: "paypal.com", href: "javascript:go()", hostname: "", protocol: "javascript:" })], linkCount: 1 }),
+    );
+    expect(reading.findings.find((f) => f.kind === "link_text_mismatch")?.evidence).toEqual(["“paypal.com” → javascript:go()"]);
   });
 
   it("does not mistake library names for hostnames", () => {
@@ -403,7 +437,7 @@ describe("wording", () => {
         hostname: "xn--80ak6aa92e.com",
         forms: [
           form({ action: "http://collect.elsewhere.net/p", fields: [field({ type: "password" }), field({ name: "cardnumber" })] }),
-          form({ label: "Form 2", action: "", actionRaw: "javascript:send()", hasActionAttribute: true }),
+          form({ label: "Form 2", action: "", actionRaw: "javascript:send()" }),
         ],
         looseSensitiveFields: [field({ type: "password", name: "pw2" })],
         links: [
@@ -465,12 +499,22 @@ describe("helpers", () => {
     expect(classifyField(field({ placeholder: "Social Security Number" }))).toBe("government_id");
     expect(classifyField(field({ type: "email" }))).toBe("email");
     expect(classifyField(field({ name: "comment" }))).toBeNull();
+    expect(classifyField(field({ name: "telephone" }))).toBe("phone");
+    // "pan" is a card number only as a whole word; a Japan office field is not a payment ask.
+    expect(classifyField(field({ name: "japan_office" }))).toBeNull();
+    expect(classifyField(field({ name: "pan" }))).toBe("payment_card");
   });
 
   it("admits per-run limits in what it could not check", () => {
-    const lines = buildNotChecked(signals({ linksTruncated: true, linkCount: 1200, links: [link()], notCollected: ["A frame."] }));
+    const lines = buildNotChecked(signals({ linksTruncated: true, linkCount: 1200, links: [link()], forms: [form({ fieldsTruncated: true })] }));
     expect(lines.some((line) => line.detail.includes("1200"))).toBe(true);
-    expect(lines.some((line) => line.detail === "A frame.")).toBe(true);
+    expect(lines.some((line) => line.label === "some fields unread" && line.detail.includes("one form"))).toBe(true);
+  });
+
+  it("names closed shadow roots as unreadable without implying open ones are", () => {
+    const closed = buildNotChecked(signals()).find((line) => line.label === "closed components");
+    expect(closed?.detail).toContain("closed shadow root");
+    expect(closed?.detail).toContain("Open ones are read");
   });
 
   it("says nothing about truncation when nothing was truncated", () => {
@@ -547,7 +591,7 @@ describe("grouping what a page asks for", () => {
   it("claims nothing either way when the destination cannot be read", () => {
     const reading = readSecuritySignals(
       signals({
-        forms: [form({ label: "Sign in", action: "", actionRaw: "", hasActionAttribute: false, fields: [field({ type: "password" })] })],
+        forms: [form({ label: "Sign in", action: "", actionRaw: "", fields: [field({ type: "password" })] })],
       }),
     );
 

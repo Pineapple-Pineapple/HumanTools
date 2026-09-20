@@ -41,7 +41,7 @@ function prob(v: unknown): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : undefined;
 }
 
-export function isHttpUrl(href: string): boolean {
+function isHttpUrl(href: string): boolean {
   return /^https?:\/\//i.test(href);
 }
 
@@ -55,11 +55,10 @@ export interface ClaimValidation {
 
 /**
  * The code-side verifier between the model and the card UI. It never trusts the model's shape:
- * every claim must quote text that really is in the inspected passage (a span check, the same
- * way the spec's Network validator requires spans), sources can only be links the page itself
- * contains (referenced by index, so the model can't invent a URL), and any verdict other than
- * "unverified" needs at least one such source or it's downgraded — the unsourced read is kept
- * separately so the reader still sees it, labeled as such.
+ * every claim must quote text that really is in the inspected passage, sources can only be links
+ * the page itself contains (referenced by index, so the model can't invent a URL), and any verdict
+ * other than "unverified" needs at least one such source or it's downgraded — the unsourced read
+ * is kept separately so the reader still sees it, labeled as such.
  */
 export function validateClaims(raw: unknown, target: InspectTarget): ClaimValidation {
   const list = (raw as { claims?: unknown } | null)?.claims;
@@ -166,7 +165,8 @@ export function parseSlopResponse(data: unknown): SlopReport {
     aiProbability,
     mixedProbability: prob(probs.mixed),
     humanProbability: prob(probs.human),
-    predictedClass: str(doc.predicted_class) ?? (aiProbability >= 0.5 ? "ai" : "human"),
+    // Reported as GPTZero's read, so nothing here invents a class it did not give.
+    predictedClass: str(doc.predicted_class) ?? "unknown",
     confidence: str(doc.confidence_category) ?? "unknown",
     message: str(doc.result_message),
     sentences,

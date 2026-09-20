@@ -15,8 +15,3 @@ export interface Limit {
 export function limit(label: string, detail: string): Limit {
   return { label, detail };
 }
-
-/** Every sentence, for the places that still want the disclosure as prose. */
-export function limitDetails(limits: readonly Limit[]): string[] {
-  return limits.map((entry) => entry.detail);
-}

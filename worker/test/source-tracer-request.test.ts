@@ -83,5 +83,34 @@ describe("POST /v1/trace", () => {
     expect(response?.status).toBe(200);
     expect(idNames).toEqual(["install-1"]);
     expect(forwarded).toHaveLength(1);
+    await expect(forwarded[0].json()).resolves.toEqual({
+      verifiedQuote: "revenue increased",
+      installId: "install-1",
+      claim: "Revenue rose.",
+      page: { url: "https://example.test", title: "Example" },
+    });
+  });
+
+  it("rejects an oversized quote before it reaches any agent", async () => {
+    const module = await loadWorker();
+    expect(module).not.toBeNull();
+    let routed = false;
+    const response = await module?.default.fetch(
+      new Request("https://worker.test/v1/trace", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          claim: "Revenue rose.",
+          verifiedQuote: "x".repeat(1001),
+          page: { url: "https://example.test", title: "Example" },
+          installId: "install-1",
+        }),
+      }),
+      { SOURCE_TRACER: { idFromName: () => { routed = true; return "id"; }, get: () => ({ fetch: async () => new Response() }) } } as unknown as Env,
+    );
+
+    expect(response?.status).toBe(400);
+    await expect(response?.json()).resolves.toEqual({ error: "verifiedQuote exceeds 1000 characters." });
+    expect(routed).toBe(false);
   });
 });

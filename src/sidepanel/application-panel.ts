@@ -2,13 +2,9 @@ import { collectApplicationSignals } from "../content/application-signals";
 import { getActiveTabId } from "../lib/active-tab";
 import { buildApplicationReport } from "../lib/application-heuristics";
 import type { ApplicationReport, ApplicationSection, Finding, RawApplicationSignals } from "../lib/application-heuristics";
-import type { Limit } from "../lib/limits";
 import { createTabStore, getCurrentTabId, onTabActivated, onTabNavigated } from "../lib/tab-state";
 import { whenVisible } from "../lib/panel-visibility";
-
-const SECTION_LABEL = "text-[11px] uppercase tracking-wide text-muted";
-const BTN =
-  "inline-flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800 border border-neutral-600 rounded text-neutral-100";
+import { BTN, el, H1, pageAccessError, STATUS, renderLimits } from "./ui";
 
 const BASIS_LABEL: Record<Finding["basis"], string> = {
   observed: "Read off the page",
@@ -19,22 +15,6 @@ const BASIS_TITLE: Record<Finding["basis"], string> = {
   observed: "A fact taken straight from the page — the element, count or measurement is right there.",
   pattern: "A guess from matching words or domain names against a short list kept in this extension. Not proof, and not exhaustive.",
 };
-
-function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = "", text?: string): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-/** Turns scripting failures on pages extensions can't touch into something a reader understands. */
-function pageAccessError(err: unknown): string {
-  const message = err instanceof Error ? err.message : String(err);
-  if (/cannot access|cannot be scripted|extensions gallery|chrome:\/\//i.test(message)) {
-    return "This page can't be scanned — browser pages and extension stores are off-limits to extensions.";
-  }
-  return message || "Couldn't read this page.";
-}
 
 /**
  * One finding as a label row: its title, and a count of the evidence behind it. The sentence that
@@ -99,23 +79,6 @@ function renderSection(section: ApplicationSection, first: boolean): HTMLElement
 }
 
 /** The limits, as a strip of chips. Each one keeps its full sentence as the thing it says on hover. */
-function renderLimits(limits: readonly Limit[]): HTMLElement {
-  const wrap = el("div", "flex flex-col gap-1.5 pt-3 border-t border-neutral-800");
-  wrap.append(el("div", SECTION_LABEL, "Blind spots"));
-  const strip = el("div", "flex flex-wrap gap-1.5");
-  for (const entry of limits) {
-    const chip = el(
-      "span",
-      "inline-flex items-center px-1.5 py-0.5 rounded border border-dashed border-neutral-600 text-neutral-400 text-[11px] leading-snug",
-      entry.label,
-    );
-    chip.title = entry.detail;
-    strip.appendChild(chip);
-  }
-  wrap.appendChild(strip);
-  return wrap;
-}
-
 function looksLikeSignals(value: unknown): value is RawApplicationSignals {
   const candidate = value as RawApplicationSignals | null;
   return (
@@ -141,7 +104,7 @@ export function mountApplicationPanel(container: HTMLElement): void {
 
   const header = el("div", "flex flex-col gap-1.5");
   const titleRow = el("div", "flex items-baseline justify-between gap-2");
-  titleRow.append(el("h1", "text-neutral-100 font-medium", "Application"));
+  titleRow.append(el("h1", H1, "Application"));
   const aboutBtn = el("button", "text-[11px] text-neutral-400 hover:text-neutral-200 px-1 py-0.5", "How this reads the page");
   titleRow.appendChild(aboutBtn);
   const about = el(
@@ -163,7 +126,7 @@ export function mountApplicationPanel(container: HTMLElement): void {
   toolbar.appendChild(scanBtn);
   root.appendChild(toolbar);
 
-  const status = el("p", "text-xs text-muted min-h-[1em]", "Nothing scanned yet.");
+  const status = el("p", STATUS, "Nothing scanned yet.");
   root.appendChild(status);
 
   // The label itself: one bordered block, a heavy rule under its head, a thin rule between bands.
@@ -224,7 +187,7 @@ export function mountApplicationPanel(container: HTMLElement): void {
     label.replaceChildren(head, meta, ...bands, basis);
     label.hidden = false;
 
-    limitsWrap.replaceChildren(renderLimits(report.notChecked));
+    limitsWrap.replaceChildren(renderLimits(report.notChecked, "flex flex-col gap-1.5 pt-3 border-t border-neutral-800"));
     limitsWrap.append(
       el(
         "p",
@@ -263,14 +226,14 @@ export function mountApplicationPanel(container: HTMLElement): void {
         signals: result,
         status: report.findingCount
           ? `${report.findingCount} thing${report.findingCount === 1 ? "" : "s"} worth knowing about this page.`
-          : "Nothing matched on this page — read the limits below before taking that as an all-clear.",
+          : "Nothing matched on this page — read the blind spots below before taking that as an all-clear.",
       };
       views.set(tabId, view);
       render(view);
       status.textContent = view.status;
     } catch (err) {
       if (!stillCurrent(tabId, myRun)) return;
-      status.textContent = pageAccessError(err);
+      status.textContent = pageAccessError(err, "scanned");
     } finally {
       if (myRun === runId) scanBtn.disabled = false;
     }

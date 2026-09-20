@@ -21,6 +21,32 @@ function parseResults(payload: unknown): RawSearchResult[] {
   });
 }
 
+/** Brave rejects a query over 400 characters or 50 words. */
+const MAX_QUERY_CHARS = 400;
+const MAX_QUERY_WORDS = 50;
+
+function words(text: string): string[] {
+  return text.split(/\s+/).filter(Boolean);
+}
+
+function compose(claim: readonly string[], quote: readonly string[]): string {
+  return `${claim.join(" ")} ${quote.length ? `"${quote.join(" ")}"` : ""}`.trim();
+}
+
+/**
+ * The exact phrase is what finds the page; the claim only adds context. When the pair exceeds
+ * Brave's limits the claim is shortened first, then the quote, always on word boundaries.
+ */
+export function searchQuery(claim: string, verifiedQuote: string): string {
+  const quote = words(verifiedQuote);
+  const claimWords = words(claim);
+  let quoteCount = Math.min(quote.length, MAX_QUERY_WORDS);
+  while (quoteCount > 0 && compose([], quote.slice(0, quoteCount)).length > MAX_QUERY_CHARS) quoteCount--;
+  let claimCount = Math.min(claimWords.length, MAX_QUERY_WORDS - quoteCount);
+  while (claimCount > 0 && compose(claimWords.slice(0, claimCount), quote.slice(0, quoteCount)).length > MAX_QUERY_CHARS) claimCount--;
+  return compose(claimWords.slice(0, claimCount), quote.slice(0, quoteCount));
+}
+
 export class BraveSearchClient {
   constructor(
     private readonly apiKey: string,

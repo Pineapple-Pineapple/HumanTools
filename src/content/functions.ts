@@ -7,10 +7,15 @@ import type { InspectTarget, OutlineBlock, OutlineLabel, PageModel } from "../li
  * sibling consts — those would throw ReferenceError at injection time. Only
  * `import type` is safe (erased at compile time) and literals declared inside
  * the function body itself.
+ *
+ * Block text is whitespace-collapsed, so a quote verified against it can be found again on the
+ * page by the same comparison. `rewrittenBlocks` counts paragraphs currently carrying a rewrite,
+ * so the Accessibility panel's Restore reflects the page rather than its memory of it.
  */
-export function extractPageBlocks(): PageModel {
+export function extractPageBlocks(): PageModel & { rewrittenBlocks: number } {
   const MIN_BLOCK_LENGTH = 40;
   const EXCLUDED_ANCESTOR_SELECTOR = "nav, header, footer, aside, script, style";
+  const REWRITTEN_CLASS = "__ht-rewritten";
 
   const paragraphs = Array.from(document.querySelectorAll("p"));
   const blocks: { id: string; text: string }[] = [];
@@ -18,7 +23,7 @@ export function extractPageBlocks(): PageModel {
   const pageUrl = location.href.split("#")[0];
 
   paragraphs.forEach((el, index) => {
-    const text = el.textContent?.trim() ?? "";
+    const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
     if (text.length < MIN_BLOCK_LENGTH) return;
     if (el.closest(EXCLUDED_ANCESTOR_SELECTOR)) return;
 
@@ -35,13 +40,26 @@ export function extractPageBlocks(): PageModel {
   });
 
   const links = Array.from(linkMap, ([href, text]) => ({ href, text }));
-  return { url: location.href, blocks, links };
+  const rewrittenBlocks = document.querySelectorAll(`.${REWRITTEN_CLASS}`).length;
+  return { url: location.href, blocks, links, rewrittenBlocks };
 }
 
-/** Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. */
-export function applyRewrites(patches: { id: string; text: string }[]): void {
+/**
+ * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. Replaces each
+ * patched paragraph's contents with the rewrite (prose, or a bullet list) and marks it as generated,
+ * with the original text on hover.
+ *
+ * The paragraph's original child nodes — links, emphasis, inline images — are moved into a stash
+ * kept in this isolated world, keyed by element, so Restore can put back the markup itself rather
+ * than a text-only copy. The isolated world outlives each call but not an extension reload, so the
+ * plain text is also kept on the element as the fallback Restore has when the stash is gone.
+ * A paragraph rewritten twice keeps the stash from the first time: the rewrite is never the original.
+ */
+export function applyRewrites(patches: { id: string; text?: string; bullets?: string[] }[]): void {
   const REWRITTEN_CLASS = "__ht-rewritten";
   const STYLE_ID = "__ht-style";
+  const w = window as Window & { __htOriginals?: WeakMap<Element, DocumentFragment> };
+  const originals = (w.__htOriginals ??= new WeakMap());
 
   if (!document.getElementById(STYLE_ID)) {
     const style = document.createElement("style");
@@ -51,51 +69,36 @@ export function applyRewrites(patches: { id: string; text: string }[]): void {
   }
 
   for (const patch of patches) {
+    if (patch.text === undefined && !patch.bullets) continue;
     const el = document.querySelector(`[data-ht-block-id="${patch.id}"]`);
     if (!(el instanceof HTMLElement)) continue;
+
     // Stash in a dedicated attribute, never in `title` — a paragraph that already had a tooltip
     // would otherwise lose its original text and get that tooltip written into its body on restore.
     if (el.dataset.htOriginal === undefined) {
       el.dataset.htOriginal = el.textContent ?? "";
       el.dataset.htPrevTitle = el.title;
-    }
-    el.title = el.dataset.htOriginal;
-    el.textContent = patch.text;
-    el.classList.add(REWRITTEN_CLASS);
-  }
-}
-
-/** Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. */
-export function applyBullets(patches: { id: string; bullets: string[] }[]): void {
-  const REWRITTEN_CLASS = "__ht-rewritten";
-  const STYLE_ID = "__ht-style";
-
-  if (!document.getElementById(STYLE_ID)) {
-    const style = document.createElement("style");
-    style.id = STYLE_ID;
-    style.textContent = `.${REWRITTEN_CLASS} { outline: 2px dashed #f59e0b; outline-offset: 2px; background: rgba(245,158,11,.08); }`;
-    document.head.appendChild(style);
-  }
-
-  for (const patch of patches) {
-    const el = document.querySelector(`[data-ht-block-id="${patch.id}"]`);
-    if (!(el instanceof HTMLElement)) continue;
-    // See applyRewrites: `title` is the hover affordance only, never the source of truth.
-    if (el.dataset.htOriginal === undefined) {
-      el.dataset.htOriginal = el.textContent ?? "";
-      el.dataset.htPrevTitle = el.title;
+      const stash = document.createDocumentFragment();
+      stash.append(...Array.from(el.childNodes));
+      originals.set(el, stash);
     }
     el.title = el.dataset.htOriginal;
 
-    const list = document.createElement("ul");
-    list.style.margin = "0";
-    list.style.paddingLeft = "1.25em";
-    for (const bullet of patch.bullets) {
-      const li = document.createElement("li");
-      li.textContent = bullet;
-      list.appendChild(li);
+    if (patch.bullets) {
+      const list = document.createElement("ul");
+      list.style.margin = "0";
+      list.style.paddingLeft = "1.25em";
+      for (const bullet of patch.bullets) {
+        const li = document.createElement("li");
+        li.textContent = bullet;
+        // Whitespace between items, as authored HTML has, so textContent doesn't glue the last word
+        // of one bullet to the first of the next when the page is re-read for its grade.
+        list.append(li, "\n");
+      }
+      el.replaceChildren(list);
+    } else {
+      el.textContent = patch.text ?? "";
     }
-    el.replaceChildren(list);
     el.classList.add(REWRITTEN_CLASS);
   }
 }
@@ -118,13 +121,16 @@ export function scrollToAndHighlight(quote: string): boolean {
     document.head.appendChild(style);
   }
 
-  const needle = quote.trim().toLowerCase();
+  // Quotes are verified against whitespace-collapsed block text (see extractPageBlocks); the page
+  // is searched the same way, or a paragraph wrapped across source lines would never match.
+  const collapse = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
+  const needle = collapse(quote);
   if (!needle) return false;
 
   const candidates = document.querySelectorAll("[data-ht-block-id]");
   for (const el of candidates) {
     if (!(el instanceof HTMLElement)) continue;
-    if (!(el.textContent ?? "").toLowerCase().includes(needle)) continue;
+    if (!collapse(el.textContent ?? "").includes(needle)) continue;
 
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     el.classList.remove(FLASH_CLASS);
@@ -138,18 +144,25 @@ export function scrollToAndHighlight(quote: string): boolean {
 }
 
 /**
- * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks.
- * Returns how many paragraphs were put back, so the panel can't claim a restore that didn't happen.
+ * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. Puts every
+ * rewritten paragraph back as it was — its stashed markup when this world still holds it, its plain
+ * text otherwise (see applyRewrites). Returns how many paragraphs were put back, so the panel can't
+ * claim a restore that didn't happen.
  */
 export function restoreOriginal(): number {
   const REWRITTEN_CLASS = "__ht-rewritten";
   const STYLE_ID = "__ht-style";
+  const w = window as Window & { __htOriginals?: WeakMap<Element, DocumentFragment> };
 
   let restored = 0;
   document.querySelectorAll(`.${REWRITTEN_CLASS}`).forEach((el) => {
     if (!(el instanceof HTMLElement)) return;
-    const original = el.dataset.htOriginal;
-    if (original !== undefined) el.textContent = original;
+    const stash = w.__htOriginals?.get(el);
+    const text = el.dataset.htOriginal;
+    if (stash) el.replaceChildren(stash);
+    else if (text !== undefined) el.textContent = text;
+    if (stash || text !== undefined) restored += 1;
+    w.__htOriginals?.delete(el);
 
     const prevTitle = el.dataset.htPrevTitle;
     if (prevTitle) el.title = prevTitle;
@@ -158,7 +171,6 @@ export function restoreOriginal(): number {
     delete el.dataset.htOriginal;
     delete el.dataset.htPrevTitle;
     el.classList.remove(REWRITTEN_CLASS);
-    restored += 1;
   });
   document.getElementById(STYLE_ID)?.remove();
   return restored;
@@ -490,6 +502,13 @@ export function markClaims(blockId: string | null, claims: { n: number; quote: s
     if (at === -1) continue;
     const last = positions[at + needle.length - 1];
     found.push({ n: claim.n, status: claim.status, at, start: positions[at], end: { node: last.node, offset: last.offset + 1 } });
+  }
+
+  // After a reload the stamped id is gone and the whole body was searched. Put the id back on the
+  // block holding the first match, so "Show on page" can find it again without re-inspecting.
+  if (blockId && root === document.body && found.length) {
+    const BLOCKS = "p, li, blockquote, dd, dt, td, th, figcaption, h1, h2, h3, h4, h5, h6, pre";
+    found[0].start.node.parentElement?.closest(BLOCKS)?.setAttribute("data-ht-inspect-id", blockId);
   }
 
   const ranges = found.map((f) => {

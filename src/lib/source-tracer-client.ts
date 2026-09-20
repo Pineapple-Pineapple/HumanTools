@@ -109,34 +109,50 @@ function traceEvent(value: unknown): SourceTraceEvent | null {
     : null;
 }
 
-export function parseSourceTraceLines(lines: readonly string[]): SourceTraceResult {
-  const trace: SourceTraceEvent[] = [];
-  let sources: VerifiedSource[] = [];
-  let contexts: ContextSource[] = [];
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    try {
-      const message = JSON.parse(line) as { type?: unknown; sources?: unknown; contexts?: unknown };
-      const event = traceEvent(message);
-      if (event) trace.push(event);
-      if (message.type === "SOURCE_TRACE_DONE" && Array.isArray(message.sources)) {
-        sources = message.sources.flatMap((source) => {
-          const verified = verifiedSource(source);
-          return verified ? [verified] : [];
-        });
-        contexts = Array.isArray(message.contexts)
-          ? message.contexts.flatMap((source) => {
-              const context = contextSource(source);
-              return context ? [context] : [];
-            })
-          : [];
-      }
-    } catch {
-      // A malformed streaming record is ignored; it cannot become evidence.
-    }
+/**
+ * Folds one streamed record into `into`, returning its trace event if it carried one. A malformed
+ * record is ignored: it cannot become evidence.
+ */
+function foldSourceTraceLine(line: string, into: SourceTraceResult): SourceTraceEvent | null {
+  if (!line.trim()) return null;
+  let message: { type?: unknown; sources?: unknown; contexts?: unknown } | null;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    return null;
   }
-  return { trace, sources, contexts };
+  if (typeof message !== "object" || message === null) return null;
+
+  const event = traceEvent(message);
+  if (event) into.trace.push(event);
+  if (message.type === "SOURCE_TRACE_DONE" && Array.isArray(message.sources)) {
+    into.sources = message.sources.flatMap((source) => {
+      const verified = verifiedSource(source);
+      return verified ? [verified] : [];
+    });
+    into.contexts = Array.isArray(message.contexts)
+      ? message.contexts.flatMap((source) => {
+          const context = contextSource(source);
+          return context ? [context] : [];
+        })
+      : [];
+  }
+  return event;
 }
+
+export function parseSourceTraceLines(lines: readonly string[]): SourceTraceResult {
+  const result: SourceTraceResult = { trace: [], sources: [], contexts: [] };
+  for (const line of lines) foldSourceTraceLine(line, result);
+  return result;
+}
+
+/**
+ * Streams one trace from the Worker, reporting each trace event as its line arrives. Aborting
+ * `signal` cancels the request; the Worker stops the trace on its end when the body closes. A
+ * trace that produces nothing for `TRACE_TIMEOUT_MS` is abandoned so a stalled Worker cannot hold
+ * the Inspector on "Checking…" indefinitely.
+ */
+const TRACE_TIMEOUT_MS = 90_000;
 
 export async function requestSourceTrace(
   endpoint: string,
@@ -144,31 +160,41 @@ export async function requestSourceTrace(
   onTrace: (event: SourceTraceEvent) => void,
   signal?: AbortSignal,
 ): Promise<SourceTraceResult> {
+  const timeout = AbortSignal.timeout(TRACE_TIMEOUT_MS);
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
-    signal,
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
   });
+  if (response.status === 429) {
+    const wait = Number(response.headers.get("Retry-After"));
+    throw new Error(
+      Number.isFinite(wait) && wait > 0
+        ? `The Source Tracer is rate-limiting this install; try again in ${Math.ceil(wait)}s.`
+        : "The Source Tracer is rate-limiting this install; try again shortly.",
+    );
+  }
   if (!response.ok) throw new Error(`Source tracing failed (${response.status}).`);
   if (!response.body) throw new Error("Source tracer returned no response stream.");
 
+  const result: SourceTraceResult = { trace: [], sources: [], contexts: [] };
+  const fold = (line: string) => {
+    const event = foldSourceTraceLine(line, result);
+    if (event) onTrace(event);
+  };
+
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  const lines: string[] = [];
   let remainder = "";
   while (true) {
     const { done, value } = await reader.read();
     remainder += decoder.decode(value, { stream: !done });
-    const chunks = remainder.split("\n");
-    remainder = chunks.pop() ?? "";
-    for (const line of chunks) {
-      lines.push(line);
-      const [event] = parseSourceTraceLines([line]).trace;
-      if (event) onTrace(event);
-    }
+    const lines = remainder.split("\n");
+    remainder = lines.pop() ?? "";
+    lines.forEach(fold);
     if (done) break;
   }
-  if (remainder) lines.push(remainder);
-  return parseSourceTraceLines(lines);
+  fold(remainder);
+  return result;
 }

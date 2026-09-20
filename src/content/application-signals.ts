@@ -83,12 +83,12 @@ export async function collectApplicationSignals(): Promise<RawApplicationSignals
     if (type === "checkbox") {
       // Not gated on `instanceof HTMLInputElement`: a checkbox from another realm is still a
       // checkbox to the reader, and falling through would file it as a data-collecting field.
-      const input = node as HTMLInputElement;
       if (checkboxes.length < MAX_CHECKBOXES) {
         checkboxes.push({
-          // The `checked` attribute is what "already ticked when you arrived" means in HTML.
-          defaultChecked: node.hasAttribute("checked") || input.defaultChecked === true,
-          checked: input.checked === true,
+          // The `checked` attribute is what "already ticked when you arrived" means in HTML. The
+          // live property would also catch boxes script ticked, but so would boxes the reader
+          // ticked, and those must never be reported as the page's doing.
+          defaultChecked: node.hasAttribute("checked"),
           label: labelTextFor(node),
           name: text(node.getAttribute("name") || node.getAttribute("id"), 80),
         });
@@ -134,16 +134,11 @@ export async function collectApplicationSignals(): Promise<RawApplicationSignals
     pushResource("script", (script as HTMLScriptElement).src);
   }
 
-  let crossOriginFrames = 0;
   for (const frame of Array.from(document.querySelectorAll("iframe[src]"))) {
-    const src = (frame as HTMLIFrameElement).src;
-    pushResource("iframe", src);
-    try {
-      if (src && new URL(src, location.href).origin !== location.origin) crossOriginFrames += 1;
-    } catch {
-      /* an unparseable frame src is not counted either way */
-    }
+    pushResource("iframe", (frame as HTMLIFrameElement).src);
   }
+  // This collector runs in the top document only, so every frame is unread, same-origin or not.
+  const frameCount = document.querySelectorAll("iframe, frame").length;
 
   // A 1x1 image from another origin is a tracking pixel in all but name.
   for (const image of Array.from(document.querySelectorAll("img[src]"))) {
@@ -275,9 +270,7 @@ export async function collectApplicationSignals(): Promise<RawApplicationSignals
 
   return {
     url: location.href,
-    title: document.title,
     fields,
-    formCount: document.forms.length,
     resources,
     checkboxes,
     controls,
@@ -290,7 +283,7 @@ export async function collectApplicationSignals(): Promise<RawApplicationSignals
     sessionStorageKeys,
     storageNote,
     permissions,
-    crossOriginFrames,
+    frameCount,
     truncated,
   };
 }

@@ -22,11 +22,9 @@ export interface FieldSignal {
 
 export interface FormSignal {
   label: string;
-  method: string;
   /** Absolute URL the form posts to, or "" when the action is not a resolvable web address. */
   action: string;
   actionRaw: string;
-  hasActionAttribute: boolean;
   /** formaction overrides declared on submit controls; each one is a second destination. */
   formActions: string[];
   fields: FieldSignal[];
@@ -59,7 +57,6 @@ export interface SecuritySignals {
   origin: string;
   protocol: string;
   hostname: string;
-  title: string;
   forms: FormSignal[];
   formsTruncated: boolean;
   /** Password/payment inputs sitting outside any <form> — their destination lives in script. */
@@ -73,8 +70,6 @@ export interface SecuritySignals {
   mixedContentTruncated: boolean;
   /** Frames declared in this document, whether or not the collector got inside them. */
   frameCount: number;
-  /** Things the walker itself could not reach, reported verbatim to the reader. */
-  notCollected: string[];
 }
 
 export type Severity = "high" | "medium" | "low";
@@ -87,6 +82,7 @@ export type FindingKind =
   | "form_action_not_a_web_address"
   | "loose_sensitive_fields"
   | "link_text_mismatch"
+  | "link_wrapped"
   | "punycode_host"
   | "shortened_link"
   | "third_party_code"
@@ -277,6 +273,42 @@ export function hostFromLinkText(text: string): string | null {
   return host;
 }
 
+/**
+ * Whether a link's own address carries the site its text names — the shape of a tracking
+ * redirector or a link wrapper ("https://go.tracker.net/?u=https://example.com/…" under the text
+ * "example.com"). Every host-like run in the decoded address is compared by registrable name, so
+ * "notexample.com" does not vouch for "example.com".
+ */
+function hrefCarriesDomain(href: string, domain: string): boolean {
+  let decoded = href;
+  try {
+    decoded = decodeURIComponent(href);
+  } catch {
+    /* a malformed escape leaves the raw address, which is still worth scanning */
+  }
+  return decoded
+    .toLowerCase()
+    .split(/[^a-z0-9.-]+/)
+    .some((token) => token.includes(".") && effectiveDomain(token) === domain);
+}
+
+/**
+ * What a link's text claims against where it goes. "mismatch" is text reading as one site and an
+ * address on another with nothing connecting them; "wrapped" is the same disagreement where the
+ * address itself carries the named site, which is how redirectors and link wrappers are built. Null
+ * when the text is just words, or names the site the link is on.
+ */
+export function linkClaim(link: LinkSignal): "mismatch" | "wrapped" | null {
+  const claimed = hostFromLinkText(link.text);
+  if (!claimed) return null;
+  if (link.protocol !== "http:" && link.protocol !== "https:") return "mismatch";
+  const actual = link.hostname.toLowerCase();
+  if (!actual) return null;
+  const claimedDomain = effectiveDomain(claimed);
+  if (claimedDomain === effectiveDomain(actual)) return null;
+  return hrefCarriesDomain(link.href, claimedDomain) ? "wrapped" : "mismatch";
+}
+
 export function classifyField(field: FieldSignal): SensitiveKind | null {
   const type = field.type.toLowerCase();
   const autocomplete = field.autocomplete.toLowerCase();
@@ -289,7 +321,7 @@ export function classifyField(field: FieldSignal): SensitiveKind | null {
   if (
     autocomplete.includes("cc-number") ||
     autocomplete.includes("cc-exp") ||
-    /card.?number|cardnum|ccnum|cc.?num|credit.?card|debit.?card|pan\b/.test(words)
+    /card.?number|cardnum|ccnum|cc.?num|credit.?card|debit.?card|\bpan\b/.test(words)
   ) {
     return "payment_card";
   }
@@ -298,7 +330,7 @@ export function classifyField(field: FieldSignal): SensitiveKind | null {
   }
   if (autocomplete.includes("bday") || /date.?of.?birth|\bdob\b|birth.?date/.test(words)) return "date_of_birth";
   if (type === "email" || autocomplete.includes("email") || /e-?mail/.test(words)) return "email";
-  if (type === "tel" || autocomplete.includes("tel") || /\bphone\b|mobile.?number/.test(words)) return "phone";
+  if (type === "tel" || autocomplete.includes("tel") || /phone\b|mobile.?number/.test(words)) return "phone";
   if (/street.?address|postal.?code|\bzip\b|address.?line/.test(words) || autocomplete.includes("street-address")) {
     return "address";
   }
@@ -397,7 +429,7 @@ const SEVERITY_RANK: Record<Severity, number> = { high: 0, medium: 1, low: 2 };
  * nothing" and "this page is fine" are different statements, and only the first one is true.
  */
 export function emptyFindingsMessage(): string {
-  return "None of the checks below matched anything in this page's markup. That is not a judgement about this page — it only means these particular signals were absent. Read what we could not check.";
+  return "None of the checks matched anything in this page's markup. That is not a judgement about this page — it only means these particular signals were absent. Read the blind spots below.";
 }
 
 /** A neutral count, never a grade. Severity is per finding; nothing is summed into a verdict. */
@@ -579,6 +611,7 @@ export function readSecuritySignals(signals: SecuritySignals, frames: readonly S
 
   // ---- Links -----------------------------------------------------------------------------------
   const mismatches: string[] = [];
+  const wrapped: string[] = [];
   const punycodeLinks = new Set<string>();
   const shorteners = new Set<string>();
   const blankNoOpener: string[] = [];
@@ -586,15 +619,11 @@ export function readSecuritySignals(signals: SecuritySignals, frames: readonly S
 
   for (const context of contexts) {
     for (const link of context.signals.links) {
-      const claimed = hostFromLinkText(link.text);
-      if (claimed) {
-        const actual = link.hostname.toLowerCase();
-        const webLink = link.protocol === "http:" || link.protocol === "https:";
-        if (!webLink) {
-          mismatches.push(inFrame(context, `“${link.text}” → ${link.href}`));
-        } else if (actual && effectiveDomain(claimed) !== effectiveDomain(actual)) {
-          mismatches.push(inFrame(context, `“${link.text}” → ${actual}`));
-        }
+      const claim = linkClaim(link);
+      if (claim === "mismatch") {
+        mismatches.push(inFrame(context, `“${link.text}” → ${link.hostname.toLowerCase() || link.href}`));
+      } else if (claim === "wrapped") {
+        wrapped.push(inFrame(context, `“${link.text}” → ${link.hostname.toLowerCase()}`));
       }
       if (link.hostname && hasPunycodeLabel(link.hostname)) {
         punycodeLinks.add(inFrame(context, describeHostname(link.hostname.toLowerCase())));
@@ -615,14 +644,27 @@ export function readSecuritySignals(signals: SecuritySignals, frames: readonly S
     }
   }
 
+  // Medium, not high: from the markup alone a mismatch cannot be told apart from a redirector that
+  // encodes its destination, so the finding is "look before you click", not "this is a trap".
   if (mismatches.length > 0) {
     findings.push({
       kind: "link_text_mismatch",
-      severity: "high",
+      severity: "medium",
       title: `${mismatches.length} link${mismatches.length === 1 ? " shows" : "s show"} one address and point${mismatches.length === 1 ? "s" : ""} at another`,
       explanation:
-        "The words in the link read as a web address, but the link goes somewhere with a different registered name. Tracking redirectors and link wrappers produce this honestly; so does a link written to look like it goes to a bank. The pairs below are what the page says versus where it goes.",
+        "The words in the link read as a web address, but the link goes somewhere with a different registered name and nothing in its address mentions the one the text names. A redirector that encodes its destination looks like this; so does a link written to look like it goes to a bank. The pairs below are what the page says versus where it goes. The section on following links can find out where one lands.",
       evidence: capEvidence(mismatches, 8),
+    });
+  }
+
+  if (wrapped.length > 0) {
+    findings.push({
+      kind: "link_wrapped",
+      severity: "low",
+      title: `${wrapped.length} link${wrapped.length === 1 ? " goes" : "s go"} through another address first`,
+      explanation:
+        "The words in the link name one site and the link points at another, but that other address carries the named site inside it — the shape of a tracking redirector or a link wrapper. These usually land where they say, after telling the wrapper that the link was clicked. Nothing was followed to confirm that.",
+      evidence: capEvidence(wrapped, 8),
     });
   }
 
@@ -723,18 +765,8 @@ export function readSecuritySignals(signals: SecuritySignals, frames: readonly S
  * The panel's honesty line. Every line here has to be a limit that still holds after the code was
  * written — a list of things nobody got round to doing is an excuse list, not a disclosure. What is
  * left is assembled rather than hardcoded so it also names the limits of this particular run: a
- * truncated list, a frame that returned nothing, a form aimed at a named window.
+ * truncated list, a frame that returned nothing.
  */
-/** Labels for the limits the collector reports in its own words, so they can be chips too. */
-const COLLECTOR_LABELS: [RegExp, string][] = [
-  [/form that targets a frame or a named window/i, "form target unknown"],
-];
-
-function collectorLabel(detail: string): string {
-  for (const [pattern, label] of COLLECTOR_LABELS) if (pattern.test(detail)) return label;
-  return "not collected";
-}
-
 export function buildNotChecked(signals: SecuritySignals, frames: readonly SecuritySignals[] = []): Limit[] {
   const documents = [signals, ...frames];
   const sum = (pick: (one: SecuritySignals) => number): number => documents.reduce((total, one) => total + pick(one), 0);
@@ -749,6 +781,10 @@ export function buildNotChecked(signals: SecuritySignals, frames: readonly Secur
       "look-alike names",
       "Whether a name that reads like a familiar one belongs to it. Encoded hostnames are decoded and both forms are shown, so the comparison is there to make; nothing here matches a name against a list of brands, because doing that accuses ordinary international sites of imitation.",
     ),
+    limit(
+      "closed components",
+      "Anything inside a component that has closed its internals to the page — a closed shadow root. Open ones are read; a closed one cannot be, and nothing in the markup says which is which, so a form built that way is missing from this read without a trace.",
+    ),
   ];
 
   if (any((one) => one.linksTruncated)) {
@@ -758,6 +794,15 @@ export function buildNotChecked(signals: SecuritySignals, frames: readonly Secur
   }
   if (any((one) => one.formsTruncated)) {
     lines.push(limit("some forms unread", `Forms past the first ${sum((one) => one.forms.length)} read on this page.`));
+  }
+  const cutForms = documents.flatMap((one) => one.forms.filter((form) => form.fieldsTruncated));
+  if (cutForms.length > 0) {
+    lines.push(
+      limit(
+        "some fields unread",
+        `Fields past the first 40 in ${cutForms.length === 1 ? "one form" : `${cutForms.length} forms`} on this page. What those later fields ask for is not in the list above.`,
+      ),
+    );
   }
   if (any((one) => one.codeSourcesTruncated)) {
     lines.push(limit("some code sources unread", "Script and frame sources past the first 300 in a document on this page."));
@@ -776,24 +821,6 @@ export function buildNotChecked(signals: SecuritySignals, frames: readonly Secur
         `Inside ${unreadFrames} frame${unreadFrames === 1 ? "" : "s"} that returned nothing. Sandboxed frames and frames that had not finished loading cannot be read; only the frame's address was.`,
       ),
     );
-  }
-
-  // The same limit hit in several documents is one line, not one line per document — the reader
-  // needs to know it applies and where, not to scroll past it repeated.
-  const reported = new Map<string, string[]>();
-  for (const document of documents) {
-    for (const line of document.notCollected) {
-      const where = document === signals ? "" : document.url;
-      reported.set(line, [...(reported.get(line) ?? []), where]);
-    }
-  }
-  for (const [line, places] of reported) {
-    const inFrames = places.filter(Boolean);
-    const label = collectorLabel(line);
-    if (inFrames.length === 0) lines.push(limit(label, line));
-    else if (inFrames.length === 1 && places.length === 1) lines.push(limit(label, `${line} (in frame ${inFrames[0]})`));
-    else if (inFrames.length === places.length) lines.push(limit(label, `${line} (in ${inFrames.length} frames on this page)`));
-    else lines.push(limit(label, `${line} (on this page and in ${inFrames.length} frame${inFrames.length === 1 ? "" : "s"} inside it)`));
   }
   return lines;
 }

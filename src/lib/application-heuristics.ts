@@ -10,6 +10,7 @@
  */
 
 import { limit, type Limit } from "./limits";
+import { registrableDomain } from "./public-suffix";
 
 // ---- Raw signal shapes (the contract with src/content/application-signals.ts) -----------------
 
@@ -31,9 +32,12 @@ export interface RawResource {
 }
 
 export interface RawCheckbox {
-  /** The `checked` attribute as the page authored it — what was pre-selected before anyone clicked. */
+  /**
+   * The `checked` attribute as the page authored it — what was pre-selected before anyone clicked.
+   * The live property is deliberately not read: it cannot tell a box script ticked from one the
+   * reader ticked, and the second must never be reported as the page's doing.
+   */
   defaultChecked: boolean;
-  checked: boolean;
   label: string;
   name: string;
 }
@@ -65,9 +69,7 @@ export interface RawPermission {
 
 export interface RawApplicationSignals {
   url: string;
-  title: string;
   fields: RawFormField[];
-  formCount: number;
   resources: RawResource[];
   checkboxes: RawCheckbox[];
   controls: RawControl[];
@@ -82,7 +84,8 @@ export interface RawApplicationSignals {
   /** Set when storage could not be read at all (blocked cookies, sandboxed frame). */
   storageNote: string;
   permissions: RawPermission[];
-  crossOriginFrames: number;
+  /** Frames in the document. The collector runs in the top document only and enters none of them. */
+  frameCount: number;
   /** Collections that hit their collection cap, so the counts below them are floors. */
   truncated: string[];
 }
@@ -146,14 +149,17 @@ export const DATA_CATEGORY_LABELS: Record<DataCategory, string> = {
 
 const IGNORED_INPUT_TYPES = new Set(["hidden", "submit", "button", "image", "reset", "checkbox", "radio", "file", "range", "color"]);
 
-/** Ordered: the first match wins, so "cardholder name" is payment, not a plain name field. */
+/**
+ * Ordered: the first match wins, so "cardholder name" is payment, not a plain name field, and
+ * "email address" is email, not a postal address.
+ */
 const FIELD_RULES: { category: DataCategory; test: RegExp }[] = [
   { category: "payment_card", test: /\b(cc-|cc_)|card ?(number|holder|no)|cardnumber|credit ?card|debit ?card|\bcvv\b|\bcvc\b|\bcsc\b|security ?code|exp(iry|iration)|payment ?(card|method)/ },
   { category: "government_id", test: /\bssn\b|social ?security|passport|national ?id|\bnino\b|tax ?id|\btin\b|driver'?s? ?licen[cs]e|id ?number|identity ?(card|number)/ },
   { category: "date_of_birth", test: /\bdob\b|\bbday\b|birth ?(date|day)|date ?of ?birth|\bbirthdate\b/ },
+  { category: "email", test: /e-?mail/ },
   { category: "postal_address", test: /address|street|\bzip\b|postal ?code|postcode|\bcity\b|\btown\b|province|\bcounty\b|address-line/ },
   { category: "phone", test: /\bphone\b|\btel\b|telephone|mobile ?(number|phone)|\bcell\b|\bsms\b/ },
-  { category: "email", test: /e-?mail/ },
   { category: "full_name", test: /\b(first|last|given|family|full|sur) ?name\b|\bfname\b|\blname\b|^name$|\bname\b/ },
 ];
 
@@ -244,7 +250,6 @@ export const TRACKER_CATEGORY_LABELS: Record<TrackerCategory, string> = {
 export const KNOWN_TRACKERS: { domain: string; label: string; category: TrackerCategory }[] = [
   { domain: "google-analytics.com", label: "Google Analytics", category: "analytics" },
   { domain: "googletagmanager.com", label: "Google Tag Manager", category: "analytics" },
-  { domain: "analytics.google.com", label: "Google Analytics", category: "analytics" },
   { domain: "doubleclick.net", label: "Google DoubleClick", category: "advertising" },
   { domain: "googlesyndication.com", label: "Google AdSense", category: "advertising" },
   { domain: "googleadservices.com", label: "Google Ads", category: "advertising" },
@@ -308,20 +313,6 @@ export const KNOWN_TRACKERS: { domain: string; label: string; category: TrackerC
   { domain: "bugsnag.com", label: "Bugsnag", category: "error_monitoring" },
   { domain: "datadoghq.com", label: "Datadog", category: "error_monitoring" },
 ];
-
-const MULTI_PART_SUFFIXES = new Set([
-  "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "co.jp", "ne.jp", "or.jp", "co.nz", "co.za",
-  "com.au", "net.au", "org.au", "gov.au", "com.br", "com.cn", "com.hk", "com.mx", "com.sg",
-  "com.tr", "co.in", "co.kr", "co.il", "com.ar", "com.co",
-]);
-
-/** Approximate registrable domain — good enough to group hosts a reader would call "the same site". */
-export function registrableDomain(hostname: string): string {
-  const labels = hostname.toLowerCase().replace(/\.$/, "").split(".");
-  if (labels.length <= 2) return labels.join(".");
-  const lastTwo = labels.slice(-2).join(".");
-  return MULTI_PART_SUFFIXES.has(lastTwo) ? labels.slice(-3).join(".") : lastTwo;
-}
 
 export interface ThirdParty {
   domain: string;
@@ -465,34 +456,47 @@ export interface DeemphasisHit {
 }
 
 /**
+ * How far apart, as a fraction of the document, an accept and an exit can sit and still be read as
+ * two answers to the same question. A cookie banner's "Accept all" and "Manage preferences" are
+ * within a few pixels of each other; a header "Sign up" and a footer "Unsubscribe" are not a pair,
+ * and comparing them is how an ordinary footer link gets called a dark pattern.
+ */
+const SAME_DECISION_SPAN = 0.15;
+
+/**
  * An exit control (unsubscribe, cancel, reject) is de-emphasised when it is measurably harder to
- * see or reach than the page's accept action. Each reason carries the measurement behind it.
+ * see than the accept action beside it. Each reason carries the measurement behind it. An exit with
+ * no accept near it is only reported when it is both too small and too faint to read on its own —
+ * a lone grey "Unsubscribe" in a footer is the page's convention, not its pressure.
  */
 export function findDeemphasisedExits(controls: RawControl[]): DeemphasisHit[] {
   const accepts = controls.filter((c) => ACCEPT_CONTROL.test(c.text) && !EXIT_CONTROL.test(c.text));
   const exits = controls.filter((c) => EXIT_CONTROL.test(c.text));
-  if (!exits.length) return [];
-
-  const acceptSizes = accepts.map((c) => c.fontSizePx).filter((n) => n > 0).sort((a, b) => a - b);
-  const medianAccept = acceptSizes.length ? acceptSizes[Math.floor(acceptSizes.length / 2)] : 0;
-  const topAccept = accepts.length ? Math.min(...accepts.map((c) => c.positionRatio)) : 1;
 
   const hits: DeemphasisHit[] = [];
   for (const control of exits) {
     const reasons: string[] = [];
-    if (medianAccept > 0 && control.fontSizePx > 0 && control.fontSizePx <= medianAccept - 2) {
-      reasons.push(`${Math.round(control.fontSizePx)}px text against ${Math.round(medianAccept)}px on the accept action`);
-    } else if (control.fontSizePx > 0 && control.fontSizePx < 11) {
-      reasons.push(`${Math.round(control.fontSizePx)}px text — below the size used for body copy`);
-    }
-
     const ratio = contrastRatio(control.color, control.background);
-    if (ratio !== null && ratio < 3) {
-      reasons.push(`contrast ${ratio}:1 with its background — WCAG asks 4.5:1 of body text`);
-    }
+    const nearest = accepts.reduce<RawControl | null>(
+      (best, candidate) =>
+        best === null || Math.abs(candidate.positionRatio - control.positionRatio) < Math.abs(best.positionRatio - control.positionRatio)
+          ? candidate
+          : best,
+      null,
+    );
+    const paired = nearest !== null && Math.abs(nearest.positionRatio - control.positionRatio) <= SAME_DECISION_SPAN;
 
-    if (control.positionRatio > 0.9 && topAccept < 0.6) {
-      reasons.push(`sits ${Math.round(control.positionRatio * 100)}% of the way down the page`);
+    if (paired) {
+      const acceptText = truncate(nearest.text, 40);
+      if (control.fontSizePx > 0 && nearest.fontSizePx > 0 && control.fontSizePx <= nearest.fontSizePx - 2) {
+        reasons.push(`${Math.round(control.fontSizePx)}px text against ${Math.round(nearest.fontSizePx)}px on “${acceptText}”`);
+      }
+      const acceptRatio = contrastRatio(nearest.color, nearest.background);
+      if (ratio !== null && ratio < 3 && (acceptRatio === null || acceptRatio >= 3)) {
+        reasons.push(`contrast ${ratio}:1 with its background${acceptRatio === null ? "" : `, against ${acceptRatio}:1 on “${acceptText}”`}`);
+      }
+    } else if (control.fontSizePx > 0 && control.fontSizePx < 11 && ratio !== null && ratio < 3) {
+      reasons.push(`${Math.round(control.fontSizePx)}px text at contrast ${ratio}:1 — small and faint with nothing beside it to compare`);
     }
 
     if (reasons.length) hits.push({ control, reasons });
@@ -657,11 +661,11 @@ function pressureFindings(signals: RawApplicationSignals): Finding[] {
   if (deemphasised.length) {
     findings.push({
       id: "buried-exit",
-      title: `${plural(deemphasised.length, "way out", "ways out")} that are easy to miss`,
+      title: `${plural(deemphasised.length, "way out", "ways out")} that ${deemphasised.length === 1 ? "is" : "are"} easy to miss`,
       explanation:
-        "The control that lets you leave, cancel or refuse is smaller, fainter or further down the page than the one " +
-        "that agrees — or too small and faint to read on its own terms. Every measurement below is taken from the " +
-        "page as it is rendered to you.",
+        "The control that lets you leave, cancel or refuse is smaller or fainter than the control beside it that " +
+        "agrees — or, with nothing beside it to compare, too small and faint to read on its own. Every measurement " +
+        "below is taken from the page as it is rendered to you.",
       basis: "observed",
       evidence: deemphasised.slice(0, 8).map((hit) => ({
         text: `“${truncate(hit.control.text, 80)}”`,
@@ -769,8 +773,8 @@ function notCheckedLines(signals: RawApplicationSignals): Limit[] {
     ),
     limit(
       "unrecognised wording",
-      "Dark patterns are matched by wording and by measured size, colour and position. Manipulation phrased in words we " +
-        "do not recognise, or carried in an image or video, is missed.",
+      "Dark patterns are matched by wording and by measured size and colour. Manipulation phrased in words we do not " +
+        "recognise, or carried in an image or video, is missed.",
     ),
     limit(
       "no policy is read",
@@ -782,13 +786,13 @@ function notCheckedLines(signals: RawApplicationSignals): Limit[] {
       "HttpOnly cookies cannot be read from a page, so the cookie count is a floor. Cookie values are never read.",
     ),
   ];
-  if (signals.crossOriginFrames > 0) {
-    const frames = signals.crossOriginFrames;
+  if (signals.frameCount > 0) {
+    const frames = signals.frameCount;
     lines.push(
       limit(
-        `${plural(frames, "frame")} unreadable`,
-        `${plural(frames, "frame")} on this page ${frames === 1 ? "comes" : "come"} from another site and cannot be read ` +
-          `into, so any form, tracker or dark pattern inside ${frames === 1 ? "it" : "them"} is invisible here.`,
+        `${plural(frames, "frame")} unread`,
+        `${plural(frames, "frame")} on this page ${frames === 1 ? "was" : "were"} not read into — only the top document ` +
+          `is scanned — so any form, tracker or dark pattern inside ${frames === 1 ? "it" : "them"} is invisible here.`,
       ),
     );
   }
@@ -810,6 +814,11 @@ function notCheckedLines(signals: RawApplicationSignals): Limit[] {
   );
   lines.push(
     limit("anything behind a click", "Forms and prompts that only appear after a click, a scroll or a login are not seen by this scan."),
+    limit(
+      "inside components",
+      "Anything inside a web component's shadow root — some login boxes, chat widgets and cookie banners are built " +
+        "that way — is not read by this scan.",
+    ),
   );
   return lines;
 }

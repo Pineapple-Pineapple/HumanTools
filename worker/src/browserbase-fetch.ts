@@ -23,17 +23,28 @@ interface CdpResponse {
   error?: { message?: string };
 }
 
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("Browserbase fetch aborted.");
+}
+
 class CdpConnection {
   private nextId = 1;
   private readonly pending = new Map<number, { resolve: (value: Record<string, unknown>) => void; reject: (reason: Error) => void }>();
 
-  constructor(private readonly socket: WebSocket) {
+  constructor(private readonly socket: WebSocket, private readonly signal: AbortSignal) {
     socket.addEventListener("message", (event) => this.onMessage(event));
     socket.addEventListener("error", () => this.rejectPending(new TransientBrowserbaseError("Browserbase CDP connection failed.")));
     socket.addEventListener("close", () => this.rejectPending(new TransientBrowserbaseError("Browserbase CDP connection closed.")));
+    // A browser that stops answering would otherwise hold the fetch until Browserbase's own session
+    // timeout closes the socket, long after the Worker's budget for it has passed.
+    signal.addEventListener("abort", () => {
+      this.rejectPending(abortReason(signal));
+      socket.close();
+    }, { once: true });
   }
 
   request(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<Record<string, unknown>> {
+    if (this.signal.aborted) return Promise.reject(abortReason(this.signal));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
@@ -70,7 +81,11 @@ class CdpConnection {
 async function openCdp(connectUrl: string, signal: AbortSignal): Promise<CdpConnection> {
   const socket = new WebSocket(connectUrl);
   await new Promise<void>((resolve, reject) => {
-    const abort = () => reject(signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError"));
+    const abort = () => {
+      socket.close();
+      reject(abortReason(signal));
+    };
+    if (signal.aborted) return abort();
     signal.addEventListener("abort", abort, { once: true });
     socket.addEventListener("open", () => {
       signal.removeEventListener("abort", abort);
@@ -81,7 +96,7 @@ async function openCdp(connectUrl: string, signal: AbortSignal): Promise<CdpConn
       reject(new TransientBrowserbaseError("Browserbase CDP connection failed."));
     }, { once: true });
   });
-  return new CdpConnection(socket);
+  return new CdpConnection(socket, signal);
 }
 
 async function readBrowserbaseDocument(connectUrl: string, targetUrl: string, signal: AbortSignal): Promise<FetchedSource> {
@@ -121,23 +136,27 @@ async function readBrowserbaseDocument(connectUrl: string, targetUrl: string, si
   }
 }
 
+const FETCH_TIMEOUT_MS = 12_000;
+const RELEASE_TIMEOUT_MS = 5_000;
+
 export class BrowserbaseFetcher {
+  private readonly apiKey: string;
   private readonly fetcher: Fetcher;
   private readonly readDocument: DocumentReader;
+  private readonly timeoutMs: number;
 
-  constructor(options: { apiKey: string; fetcher?: Fetcher; readDocument?: DocumentReader }) {
+  constructor(options: { apiKey: string; fetcher?: Fetcher; readDocument?: DocumentReader; timeoutMs?: number }) {
     this.apiKey = options.apiKey;
     this.fetcher = options.fetcher ?? ((input, init) => globalThis.fetch(input, init));
     this.readDocument = options.readDocument ?? readBrowserbaseDocument;
+    this.timeoutMs = options.timeoutMs ?? FETCH_TIMEOUT_MS;
   }
-
-  private readonly apiKey: string;
 
   async fetch(candidate: CandidateSource): Promise<FetchedSource> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 2; attempt++) {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 12_000);
+      const timeout = setTimeout(() => controller.abort(new Error("Browserbase fetch timed out.")), this.timeoutMs);
       let sessionId: string | undefined;
       try {
         const session = await this.createSession(controller.signal);
@@ -176,6 +195,7 @@ export class BrowserbaseFetcher {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-BB-API-Key": this.apiKey },
       body: JSON.stringify({ status: "REQUEST_RELEASE" }),
+      signal: AbortSignal.timeout(RELEASE_TIMEOUT_MS),
     });
   }
 }

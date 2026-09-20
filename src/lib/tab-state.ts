@@ -78,32 +78,39 @@ function evict(tabId: number): void {
   for (const store of stores) store.forget(tabId);
 }
 
-chrome.windows.getCurrent().then((window) => {
+/**
+ * Starts following the browser. Called once by the side panel's entry point, not on import, so
+ * this module has no side effects to stub in tests and panels can subscribe before any event can
+ * fire. The window and starting tab are resolved *before* the listeners attach: an activation
+ * arriving in that gap used to pass the window filter for any window.
+ */
+export async function initTabState(): Promise<void> {
+  const [window, [tab]] = await Promise.all([
+    chrome.windows.getCurrent(),
+    chrome.tabs.query({ active: true, currentWindow: true }),
+  ]);
   panelWindowId = window.id ?? null;
-});
-
-chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
   if (tab?.id !== undefined) currentTabId = tab.id;
-});
 
-chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
-  if (panelWindowId !== null && windowId !== panelWindowId) return;
-  currentTabId = tabId;
-  for (const listener of activatedListeners) listener(tabId);
-});
+  chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+    if (panelWindowId !== null && windowId !== panelWindowId) return;
+    currentTabId = tabId;
+    for (const listener of activatedListeners) listener(tabId);
+  });
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status === "complete" && tabId === currentTabId) {
-    for (const listener of loadedListeners) listener(tabId);
-  }
-  // Only a real navigation invalidates a result; title and favicon changes do not.
-  if (!changeInfo.url) return;
-  evict(tabId);
-  if (tabId !== currentTabId) return;
-  for (const listener of navigatedListeners) listener(tabId);
-});
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.status === "complete" && tabId === currentTabId) {
+      for (const listener of loadedListeners) listener(tabId);
+    }
+    // Only a real navigation invalidates a result; title and favicon changes do not.
+    if (!changeInfo.url) return;
+    evict(tabId);
+    if (tabId !== currentTabId) return;
+    for (const listener of navigatedListeners) listener(tabId);
+  });
 
-chrome.tabs.onRemoved.addListener((tabId) => {
-  evict(tabId);
-  for (const listener of closedListeners) listener(tabId);
-});
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    evict(tabId);
+    for (const listener of closedListeners) listener(tabId);
+  });
+}

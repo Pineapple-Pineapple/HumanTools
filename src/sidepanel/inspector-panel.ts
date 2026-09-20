@@ -10,7 +10,7 @@ import {
   watchSelection,
 } from "../content/functions";
 import { requestOutlineLabels, startInspect } from "../lib/messages";
-import type { InspectTrace, TraceState } from "../lib/messages";
+import type { TraceState } from "../lib/messages";
 import { getActiveTabId } from "../lib/active-tab";
 import { createTabStore, getCurrentTabId, onTabActivated, onTabClosed, onTabLoaded, onTabNavigated } from "../lib/tab-state";
 import { getSourceTracerUrl } from "../lib/provider";
@@ -26,6 +26,24 @@ import type {
   OutlineLabel,
   SlopReport,
 } from "../lib/types";
+import {
+  ATTENTION_CHIP,
+  BODY,
+  BTN,
+  BTN_PRIMARY,
+  CHIP,
+  H1,
+  LINK_BTN,
+  NEUTRAL_CHIP,
+  NOTE,
+  SECTION_LABEL,
+  SMALL_BTN,
+  STATUS,
+  el,
+  pageAccessError,
+} from "./ui";
+
+// ---- Card vocabulary. Every chip carries its definition as a tooltip; there is no glossary. ----
 
 const TYPE_LABELS: Record<ClaimType, string> = {
   fact: "Fact",
@@ -35,6 +53,14 @@ const TYPE_LABELS: Record<ClaimType, string> = {
   quote: "Quote",
 };
 
+const TYPE_HELP: Record<ClaimType, string> = {
+  fact: "Stated as something that is the case and could be checked.",
+  opinion: "A judgment or preference; not checkable as such.",
+  speculation: "Hedged — may, might, could, reportedly.",
+  prediction: "About the future; not checkable yet.",
+  quote: "Attributed to someone. What to check is whether they said it.",
+};
+
 const STATUS_LABELS: Record<EvidenceStatus, string> = {
   supported: "Supported",
   partly_supported: "Partly supported",
@@ -42,11 +68,20 @@ const STATUS_LABELS: Record<EvidenceStatus, string> = {
   contradicted: "Contradicted",
 };
 
+const STATUS_HELP: Record<EvidenceStatus, string> = {
+  supported:
+    "The model's reading: a link the page cites backs the claim as stated. The link was not opened — only the Source Tracer checks external pages.",
+  partly_supported:
+    "The model's reading: a link the page cites backs part of the claim; the rest goes beyond it or is worded more strongly.",
+  unverified: "Nothing on the page backs this claim, so no verdict is given. Not a finding that the claim is wrong.",
+  contradicted: "The model's reading: a link the page cites says otherwise. The link was not opened.",
+};
+
 const STATUS_CHIP: Record<EvidenceStatus, string> = {
-  supported: "bg-emerald-950 text-emerald-300 border-emerald-800",
-  partly_supported: "bg-amber-950 text-amber-300 border-amber-800",
-  unverified: "bg-neutral-800 text-neutral-300 border-neutral-600",
-  contradicted: "bg-red-950 text-red-300 border-red-800",
+  supported: `${CHIP} bg-emerald-950 text-emerald-300 border-emerald-800`,
+  partly_supported: ATTENTION_CHIP,
+  unverified: NEUTRAL_CHIP,
+  contradicted: `${CHIP} bg-red-950 text-red-300 border-red-800`,
 };
 
 const STATUS_BADGE: Record<EvidenceStatus, string> = {
@@ -64,6 +99,14 @@ const FLAG_LABELS: Record<FramingFlagKind, string> = {
   loaded_wording: "Loaded wording",
 };
 
+const FLAG_HELP: Record<FramingFlagKind, string> = {
+  base_effect: "A large percentage change measured from a small starting point; the absolute change may be small.",
+  cherry_picked_window: "The time span was chosen to make the trend look its best or worst.",
+  missing_denominator: "A count with no total behind it — a thousand out of how many?",
+  relative_vs_absolute: "A relative change (doubled, 50% more) without the absolute numbers, or the reverse.",
+  loaded_wording: "Word choice that carries a judgment the evidence does not.",
+};
+
 const OUTLINE_ORDER: OutlineLabel[] = ["important", "supporting", "boilerplate", "navigation", "advertisement"];
 
 const OUTLINE_LABEL_TEXT: Record<OutlineLabel, string> = {
@@ -75,11 +118,11 @@ const OUTLINE_LABEL_TEXT: Record<OutlineLabel, string> = {
 };
 
 const OUTLINE_CHIP: Record<OutlineLabel, string> = {
-  important: "bg-amber-950 text-amber-300 border-amber-800",
-  supporting: "bg-neutral-800 text-neutral-300 border-neutral-600",
-  boilerplate: "bg-neutral-900 text-muted border-neutral-700",
-  navigation: "bg-sky-950 text-sky-300 border-sky-800",
-  advertisement: "bg-red-950 text-red-300 border-red-800",
+  important: ATTENTION_CHIP,
+  supporting: NEUTRAL_CHIP,
+  boilerplate: `${CHIP} bg-neutral-900 text-muted border-neutral-700`,
+  navigation: `${CHIP} bg-sky-950 text-sky-300 border-sky-800`,
+  advertisement: `${CHIP} bg-red-950 text-red-300 border-red-800`,
 };
 
 const TRACE_ICON: Record<TraceState, string> = { running: "…", done: "✓", skipped: "–", failed: "✕" };
@@ -90,13 +133,11 @@ const TRACE_ICON_CLASS: Record<TraceState, string> = {
   failed: "text-red-400",
 };
 
-const BTN =
-  "inline-flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800 border border-neutral-600 rounded text-neutral-100";
-const BTN_PRIMARY =
-  "inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:hover:bg-amber-600 rounded text-neutral-950 font-medium";
-const CHIP = "inline-flex items-center px-1.5 py-0.5 rounded border text-[11px] leading-none";
+const CLAIMS_HINT = "Pick a paragraph on the page, or select some text and press Inspect selection.";
 const NO_SELECTION_HINT = "Select a sentence or paragraph on the page first (at least a few words).";
-const SECTION_LABEL = "text-[11px] uppercase tracking-wide text-muted";
+const RUNNING_HINT = "An inspection is still running on this tab — wait for it to finish, or press Clear.";
+const OUTLINE_HINT =
+  "Labels each block of the page as important, supporting, boilerplate, navigation or ad, as a tree.";
 
 export function sourceContextMessage(reasons: readonly SourceContextReason[]): string {
   if (reasons.includes("page_context") && reasons.includes("non_factual_context")) {
@@ -127,30 +168,52 @@ export function isSameDocument(a: string | undefined, b: string | undefined): bo
   return a.split("#")[0] === b.split("#")[0];
 }
 
-const CLAIMS_HINT = "Pick a paragraph on the page, or select some text and press Inspect selection.";
-const OUTLINE_HINT =
-  "Labels each block of the page as important, supporting, boilerplate, navigation or ad, as a tree.";
-
 /** Session-storage key holding every tab's finished inspection, keyed by tab id. */
 const INSPECTION_KEY = "inspection";
 
-/** A finished inspection, kept in session storage so it outlives the side panel being closed. */
+/** One step of the pipeline as the trace shows it. Keyed by `step`; a later entry replaces an earlier. */
+export interface TraceEntry {
+  step: string;
+  state: TraceState;
+  detail?: string;
+  ms?: number;
+}
+
+/** Replaces the entry for `entry.step`, or appends it. Steps keep the order they first appeared in. */
+export function upsertTrace(list: TraceEntry[], entry: TraceEntry): void {
+  const i = list.findIndex((e) => e.step === entry.step);
+  if (i === -1) list.push(entry);
+  else list[i] = entry;
+}
+
+/**
+ * One tab's inspection, from the moment its run starts. `claims` is empty until extraction
+ * answers; `error` is set instead when it fails. Only records with claims are mirrored to session
+ * storage, so a run that dies with the panel leaves no half-result behind to be restored.
+ */
 interface SavedInspection {
   tabId: number;
   target: InspectTarget;
   claims: ClaimCard[];
+  error?: string;
   slop?: { report?: SlopReport; note?: string };
   sources?: {
     sourcesByQuote: Record<string, VerifiedSource[]>;
     contextsByQuote: Record<string, ContextSource[]>;
     notCheckedByQuote: Record<string, string>;
   };
+  trace: TraceEntry[];
 }
 
-function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = "", text?: string): HTMLElementTagNameMap[K] {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
+/** An inspection in flight. A new object per run, so identity says whether a callback is stale. */
+interface Run {
+  record: SavedInspection;
+  cancel: () => void;
+}
+
+function chip(className: string, text: string, help: string): HTMLSpanElement {
+  const node = el("span", className, text);
+  node.title = help;
   return node;
 }
 
@@ -177,15 +240,6 @@ function crosshairIcon(): SVGSVGElement {
   return svg;
 }
 
-/** Turns scripting failures on pages extensions can't touch into something a reader understands. */
-function pageAccessError(err: unknown): string {
-  const message = err instanceof Error ? err.message : String(err);
-  if (/cannot access|cannot be scripted|extensions gallery|chrome:\/\//i.test(message)) {
-    return "This page can't be inspected — browser pages and extension stores are off-limits to extensions.";
-  }
-  return message || "Couldn't read this page.";
-}
-
 function formatMs(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
 }
@@ -200,6 +254,14 @@ function wordCount(text: string): number {
   return text.split(/\s+/).filter(Boolean).length;
 }
 
+function externalLink(className: string, text: string, href: string): HTMLAnchorElement {
+  const link = el("a", className, text);
+  link.href = href;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  return link;
+}
+
 export interface InspectorOptions {
   /** Switches the side panel to the Inspector tab (e.g. when a claim badge on the page is clicked). */
   activate: () => void;
@@ -211,7 +273,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
 
   // ---- Header and mode switch -----------------------------------------------------------------
   const header = el("div", "flex flex-col gap-2");
-  header.appendChild(el("h1", "text-neutral-100 font-medium", "Inspector — what am I looking at?"));
+  header.appendChild(el("h1", H1, "Inspector — what am I looking at?"));
   const modeRow = el("div", "inline-flex self-start rounded border border-neutral-700 overflow-hidden text-xs");
   const claimsTab = el("button", "", "Claims");
   const outlineTab = el("button", "", "Outline");
@@ -241,16 +303,16 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   const pickLabel = el("span", "", "Pick paragraph");
   pickBtn.append(crosshairIcon(), pickLabel);
   const inspectBtn = el("button", BTN_PRIMARY, "Inspect selection");
-  inspectBtn.disabled = true;
-  inspectBtn.title = NO_SELECTION_HINT;
   const clearBtn = el("button", BTN, "Clear");
-  clearBtn.hidden = true;
   toolbar.append(pickBtn, inspectBtn, clearBtn);
 
-  const status = el("p", "text-xs text-muted min-h-[1em]", CLAIMS_HINT);
+  const status = el("p", STATUS, CLAIMS_HINT);
+  const optionsLink = el("button", LINK_BTN, "Set API key");
+  optionsLink.addEventListener("click", () => chrome.runtime.openOptionsPage());
 
   const passageSection = el("div", "flex flex-col gap-1.5");
   const provisionalSection = el("div", "flex flex-col gap-1.5");
+  const provisionalLabel = el("div", SECTION_LABEL);
   const slopSection = el("div", "flex flex-col gap-1.5");
   const claimsSection = el("div", "flex flex-col gap-3");
   const traceDetails = el("details", "text-xs text-neutral-400");
@@ -259,28 +321,44 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   traceDetails.append(traceSummary, traceList);
   const claimsFooter = el(
     "p",
-    "text-[11px] text-muted border-t border-neutral-800 pt-3",
+    `${NOTE} border-t border-neutral-800 pt-3`,
     "A matching source is evidence only when it is a distinct eligible external page. Text found on this page is context, not verification. " +
-      "No result is not proof that a claim is false.",
+      "Finding nothing is not a finding against the claim.",
   );
-  for (const section of [passageSection, provisionalSection, slopSection, claimsSection, traceDetails, claimsFooter]) {
-    section.hidden = true;
-  }
-  claimsView.append(toolbar, status, passageSection, provisionalSection, claimsSection, slopSection, traceDetails, claimsFooter);
+  claimsView.append(
+    toolbar,
+    status,
+    optionsLink,
+    passageSection,
+    provisionalSection,
+    claimsSection,
+    slopSection,
+    traceDetails,
+    claimsFooter,
+  );
 
-  /** Discards a superseded inspection run. */
-  let runId = 0;
-  /** The tab the in-flight inspection is about, so a navigation there can call it off. */
-  let runTabId: number | null = null;
   /** Discards a superseded render, so rapid tab switching can't interleave two of them. */
   let showRun = 0;
-  let cancelInspect: (() => void) | null = null;
-  /** Inspections by tab. Evicted by tab-state when a tab navigates or closes. */
-  const inspections = createTabStore<SavedInspection>();
   /** Which tab's inspection the claims view is showing — what the page's badges must match. */
   let shownTabId: number | null = null;
   /** Whether a Source Tracer endpoint is set, so cards don't claim to be checking when nothing will. */
   let tracerConfigured = false;
+  let pickTabId: number | null = null;
+  /** The tab whose HT_SELECTION reports drive the Inspect selection button, and its last report. */
+  let selectionTabId: number | null = null;
+  let hasSelection = false;
+  const cards = new Map<number, HTMLElement>();
+  const sourceSections = new Map<string, { context: HTMLElement; external: HTMLElement }>();
+  const traceRows = new Map<string, HTMLElement>();
+
+  /** Inspections by tab, live from the moment a run starts. Evicted by tab-state on navigation or close. */
+  const inspections = createTabStore<SavedInspection>();
+  /**
+   * Runs in flight, by tab. A run on one tab never touches another's: the money is spent the
+   * moment a run starts (the service worker finishes the call whether or not anyone is listening),
+   * so the only honest thing to do with its result is keep it for the tab it belongs to.
+   */
+  const runs = new Map<number, Run>();
   /**
    * Every tab's finished inspection, mirrored to session storage. Closing the side panel destroys
    * the panel's JS context, and with it the card map the page's claim badges message back into —
@@ -292,7 +370,9 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     void chrome.storage.session.set({ [INSPECTION_KEY]: Object.fromEntries(persisted) });
   }
 
+  /** Mirrors a record with claims. Until a run's claims land, the tab's previous copy stays. */
   function persistInspection(record: SavedInspection): void {
+    if (!record.claims.length) return;
     persisted.set(record.tabId, record);
     writePersisted();
   }
@@ -302,10 +382,11 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     persisted.delete(tabId);
     writePersisted();
   }
-  let pickTabId: number | null = null;
-  const cards = new Map<number, HTMLElement>();
-  const sourceSections = new Map<string, { context: HTMLElement; external: HTMLElement }>();
-  const traceRows = new Map<string, HTMLElement>();
+
+  function stopRun(tabId: number): void {
+    runs.get(tabId)?.cancel();
+    runs.delete(tabId);
+  }
 
   function setStatus(text: string): void {
     status.textContent = text;
@@ -325,12 +406,18 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     return shownTabId === tabId && isCurrentTab(tabId);
   }
 
-  /** The tab whose HT_SELECTION reports drive the Inspect selection button. */
-  let selectionTabId: number | null = null;
-
-  function setCanInspect(canInspect: boolean): void {
-    inspectBtn.disabled = !canInspect;
-    inspectBtn.title = canInspect ? "" : NO_SELECTION_HINT;
+  /**
+   * Pick and Inspect are off while this tab has a run going: a second run would be a second paid
+   * call for the same passage, and the first one's result would be thrown away. Clear is the way out.
+   */
+  function updateToolbar(): void {
+    const running = shownTabId !== null && runs.has(shownTabId);
+    pickBtn.disabled = running;
+    pickBtn.title = running ? RUNNING_HINT : "";
+    inspectBtn.disabled = running || !hasSelection;
+    inspectBtn.title = running ? RUNNING_HINT : hasSelection ? "" : NO_SELECTION_HINT;
+    clearBtn.hidden = !running && passageSection.hidden;
+    clearBtn.title = running ? "Stop this inspection and clear its results" : "Remove this tab's results and page badges";
   }
 
   /**
@@ -339,8 +426,9 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
    * not survive a navigation, and only the tab in front of the reader drives the button.
    */
   async function watchSelectionOn(tabId: number): Promise<void> {
-    setCanInspect(false);
+    hasSelection = false;
     selectionTabId = tabId;
+    updateToolbar();
     try {
       await chrome.scripting.executeScript({ target: { tabId }, func: watchSelection });
     } catch {
@@ -353,19 +441,32 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     pickLabel.textContent = tabId === null ? "Pick paragraph" : "Cancel picking";
   }
 
-  function addTrace(step: string, state: TraceState, detail?: string, ms?: number): void {
+  function renderTraceRow(entry: TraceEntry): void {
     traceDetails.hidden = false;
-    let row = traceRows.get(step);
+    let row = traceRows.get(entry.step);
     if (!row) {
       row = el("div", "flex gap-2 items-baseline");
-      traceRows.set(step, row);
+      traceRows.set(entry.step, row);
       traceList.appendChild(row);
     }
-    const icon = el("span", `w-3 shrink-0 text-center ${TRACE_ICON_CLASS[state]}`, TRACE_ICON[state]);
-    const name = el("span", "text-neutral-300 shrink-0", step);
-    const parts = [detail, ms !== undefined ? formatMs(ms) : undefined].filter(Boolean).join(" · ");
+    const icon = el("span", `w-3 shrink-0 text-center ${TRACE_ICON_CLASS[entry.state]}`, TRACE_ICON[entry.state]);
+    const name = el("span", "text-neutral-300 shrink-0", entry.step);
+    const parts = [entry.detail, entry.ms !== undefined ? formatMs(entry.ms) : undefined].filter(Boolean).join(" · ");
     const info = el("span", "text-muted min-w-0 break-words", parts);
     row.replaceChildren(icon, name, info);
+  }
+
+  function renderTrace(entries: TraceEntry[]): void {
+    traceRows.clear();
+    traceList.replaceChildren();
+    traceDetails.hidden = !entries.length;
+    for (const entry of entries) renderTraceRow(entry);
+  }
+
+  /** Records a step against its inspection, and draws it when that inspection is the one on screen. */
+  function trace(record: SavedInspection, entry: TraceEntry, draw: boolean): void {
+    upsertTrace(record.trace, entry);
+    if (draw) renderTraceRow(entry);
   }
 
   function resetResults(): void {
@@ -377,7 +478,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     for (const section of [passageSection, provisionalSection, slopSection, claimsSection, traceDetails, claimsFooter]) {
       section.hidden = true;
     }
-    clearBtn.hidden = true;
+    updateToolbar();
   }
 
   /** Flashes the inspected block on the tab whose cards are on screen — never on another tab's page. */
@@ -401,21 +502,22 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     );
     quote.title = "Show it on the page";
     quote.addEventListener("click", flashInspectedBlock);
-    const meta = [target.title, formatDate(target.publishedAt) ? `published ${formatDate(target.publishedAt)}` : undefined]
-      .filter(Boolean)
-      .join(" · ");
-    passageSection.append(quote, el("div", "text-[11px] text-muted", meta));
+    const published = formatDate(target.publishedAt);
+    const meta = [target.title, published ? `published ${published}` : undefined].filter(Boolean).join(" · ");
+    passageSection.append(quote, el("div", NOTE, meta));
   }
 
   function renderProvisional(text: string): number {
     const sentences = splitSentences(text).slice(0, 8);
     if (!sentences.length) return 0;
     provisionalSection.hidden = false;
-    provisionalSection.append(el("div", SECTION_LABEL, "First read · local heuristics, refining…"));
+    provisionalLabel.textContent = "First read · local heuristics, refining…";
+    provisionalSection.append(provisionalLabel);
     for (const sentence of sentences) {
       const row = el("div", "flex gap-2 items-start text-neutral-400");
+      const type = heuristicClaimType(sentence);
       row.append(
-        el("span", `${CHIP} shrink-0 bg-neutral-900 text-neutral-400 border-neutral-700`, TYPE_LABELS[heuristicClaimType(sentence)]),
+        chip(`${NEUTRAL_CHIP} shrink-0`, TYPE_LABELS[type], TYPE_HELP[type]),
         el("span", "min-w-0", sentence.length > 160 ? `${sentence.slice(0, 160)}…` : sentence),
       );
       provisionalSection.appendChild(row);
@@ -423,7 +525,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     return sentences.length;
   }
 
-  function renderCard(claim: ClaimCard, n: number): HTMLElement {
+  function renderCard(claim: ClaimCard, n: number, pending: boolean): HTMLElement {
     const { status: evidenceStatus, sources, notChecked, unsourcedAssessment } = claim.evidence;
     const card = el("div", "flex flex-col gap-2 rounded bg-neutral-800/70 border border-neutral-700 p-3 transition-shadow");
 
@@ -440,8 +542,8 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
 
     const chips = el("div", "flex flex-wrap gap-1.5");
     chips.append(
-      el("span", `${CHIP} bg-neutral-900 text-neutral-300 border-neutral-600`, TYPE_LABELS[claim.type]),
-      el("span", `${CHIP} ${STATUS_CHIP[evidenceStatus]}`, STATUS_LABELS[evidenceStatus]),
+      chip(NEUTRAL_CHIP, TYPE_LABELS[claim.type], TYPE_HELP[claim.type]),
+      chip(STATUS_CHIP[evidenceStatus], STATUS_LABELS[evidenceStatus], STATUS_HELP[evidenceStatus]),
     );
     card.appendChild(chips);
 
@@ -451,7 +553,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     card.appendChild(quote);
 
     const field = (label: string, value: string) => {
-      const row = el("div", "text-xs text-neutral-300 leading-snug");
+      const row = el("div", BODY);
       row.append(el("span", "text-muted", `${label}: `), document.createTextNode(value));
       return row;
     };
@@ -462,7 +564,9 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
       const flags = el("div", "flex flex-col gap-1");
       for (const flag of claim.framingFlags) {
         const row = el("div", "text-xs leading-snug");
-        row.append(el("span", "text-amber-300 font-medium", `⚑ ${FLAG_LABELS[flag.kind]}: `), el("span", "text-neutral-300", flag.note));
+        const name = el("span", "text-amber-300 font-medium", `⚑ ${FLAG_LABELS[flag.kind]}: `);
+        name.title = FLAG_HELP[flag.kind];
+        row.append(name, el("span", "text-neutral-300", flag.note));
         flags.appendChild(row);
       }
       card.appendChild(flags);
@@ -473,10 +577,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     if (sources.length) {
       for (const source of sources) {
         const row = el("div", "flex gap-2 items-baseline text-xs");
-        const link = el("a", "text-amber-400 underline hover:text-amber-300 break-words min-w-0", source.text);
-        link.href = source.href;
-        link.target = "_blank";
-        link.rel = "noopener noreferrer";
+        const link = externalLink("text-amber-400 underline hover:text-amber-300 break-words min-w-0", source.text, source.href);
         link.title = source.href;
         const tag = el("span", "shrink-0 text-[10px] text-muted", "not externally verified");
         tag.title = "Offered by the page as backing; this is distinct from a source the Source Tracer checked.";
@@ -484,7 +585,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
         evidence.appendChild(row);
       }
     } else {
-      evidence.appendChild(el("div", "text-xs text-neutral-400", "No source found."));
+      evidence.appendChild(el("div", "text-xs text-neutral-400", "The page links to nothing for this claim."));
     }
     if (unsourcedAssessment) {
       evidence.appendChild(
@@ -500,27 +601,31 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     const sourceContext = el("div", "flex flex-col gap-1");
     sourceContext.hidden = true;
     const external = el("div", "flex flex-col gap-1");
-    external.append(
-      el("div", SECTION_LABEL, "External verification"),
-      el("div", "text-xs text-neutral-400", tracerConfigured ? "Checking external sources…" : "Not checked yet."),
-    );
+    // A restored record with no sources belongs to a run that never finished — say so, rather
+    // than leaving "Checking…" on screen for a check that will never come back.
+    const placeholder = pending
+      ? tracerConfigured
+        ? "Checking external sources…"
+        : "Not checked yet."
+      : noExternalSourcesMessage("the inspection did not finish.");
+    external.append(el("div", SECTION_LABEL, "External verification"), el("div", "text-xs text-neutral-400", placeholder));
     sourceSections.set(claim.verifiedQuote, { context: sourceContext, external });
     card.append(sourceContext, external);
 
     card.appendChild(field("What we could not check", notChecked ?? "Whether the cited sources say what the page claims."));
 
     const actions = el("div", "flex gap-2 pt-1");
-    const verify = el("button", `${BTN} text-xs`, "Verify ↗");
+    const open = el("button", SMALL_BTN, "Open cited link ↗");
     if (sources.length) {
-      verify.title = `Open ${sources[0].href}`;
-      verify.addEventListener("click", () => window.open(sources[0].href, "_blank", "noopener,noreferrer"));
+      open.title = `Open ${sources[0].href}`;
+      open.addEventListener("click", () => window.open(sources[0].href, "_blank", "noopener,noreferrer"));
     } else {
-      verify.disabled = true;
-      verify.title = "No source to open";
+      open.disabled = true;
+      open.title = "The page cites no link for this claim";
     }
-    const show = el("button", `${BTN} text-xs`, "Show on page");
+    const show = el("button", SMALL_BTN, "Show on page");
     show.addEventListener("click", flashInspectedBlock);
-    actions.append(verify, show);
+    actions.append(open, show);
     card.appendChild(actions);
 
     return card;
@@ -538,12 +643,8 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     sections.context.replaceChildren(el("div", SECTION_LABEL, "Page context — not verification"));
     for (const context of contexts) {
       const row = el("div", "flex flex-col gap-0.5 text-xs");
-      const link = el("a", "text-amber-300 underline hover:text-amber-200 break-words", context.title);
-      link.href = context.url;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
       row.append(
-        link,
+        externalLink("text-amber-300 underline hover:text-amber-200 break-words", context.title, context.url),
         el("div", "text-[10px] text-amber-300", sourceContextMessage(context.contextReasons)),
         el("div", "text-neutral-400 italic", `“${context.excerpt}”`),
       );
@@ -555,21 +656,15 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     if (!sources.length) {
       section.appendChild(el("div", "text-xs text-neutral-400", noExternalSourcesMessage(notChecked)));
       if (notChecked) {
-        section.appendChild(
-          el("div", "text-[10px] text-muted", "This is not a finding about the claim; no external check ran."),
-        );
+        section.appendChild(el("div", "text-[10px] text-muted", "This is not a finding about the claim; no external check ran."));
       }
       return;
     }
     for (const source of sources) {
       const row = el("div", "flex flex-col gap-0.5 text-xs");
-      const link = el("a", "text-emerald-300 underline hover:text-emerald-200 break-words", source.title);
-      link.href = source.url;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
       const qualityClass = source.sourceQuality === "institutional_signal" ? "text-emerald-400" : "text-amber-300";
       row.append(
-        link,
+        externalLink("text-emerald-300 underline hover:text-emerald-200 break-words", source.title, source.url),
         el("div", "text-[10px] text-emerald-400", "Exact quote verified on external source"),
         el("div", `text-[10px] ${qualityClass}`, sourceQualityMessage(source.sourceQuality)),
         el("div", "text-neutral-400 italic", `“${source.excerpt}”`),
@@ -613,53 +708,76 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
         el("div", "text-xs text-neutral-400", `${flagged} of ${report.sentences.length} sentences score 50% or higher.`),
       );
     }
-    slopSection.appendChild(
-      el("div", "text-[11px] text-muted", "A probability from GPTZero, not proof of who wrote this passage."),
-    );
+    slopSection.appendChild(el("div", NOTE, "A probability from GPTZero, not proof of who wrote this passage."));
   }
 
-  async function renderClaims(claims: ClaimCard[], target: InspectTarget, tabId: number, myRun: number): Promise<void> {
+  function doneStatus(claimCount: number): string {
+    return claimCount ? `${claimCount} claim${claimCount === 1 ? "" : "s"}. Click a badge on the page to jump to its card.` : "Done.";
+  }
+
+  /**
+   * Draws the claims section for `record`: its error, its cards, or nothing yet while extraction
+   * is still running (the first read stands in). Fills the `cards` map the page's badges resolve
+   * through; returns whether there are cards for badges to point at.
+   */
+  function renderCards(record: SavedInspection, tabId: number): boolean {
+    if (record.error) {
+      provisionalLabel.textContent = "First read · local heuristics only";
+      claimsSection.hidden = false;
+      claimsSection.replaceChildren(el("div", "text-xs text-red-300", record.error));
+      return false;
+    }
+    const pending = runs.get(tabId)?.record === record;
+    if (pending && !record.claims.length) return false;
     provisionalSection.hidden = true;
     claimsSection.hidden = false;
     claimsFooter.hidden = false;
-    claimsSection.replaceChildren(el("div", SECTION_LABEL, `Claims · ${claims.length}`));
-    if (!claims.length) {
+    claimsSection.replaceChildren(el("div", SECTION_LABEL, `Claims · ${record.claims.length}`));
+    if (!record.claims.length) {
       claimsSection.appendChild(el("div", "text-xs text-neutral-400", "No checkable claims in this passage."));
-      return;
+      return false;
     }
-    claims.forEach((claim, i) => {
-      const card = renderCard(claim, i + 1);
+    record.claims.forEach((claim, i) => {
+      const card = renderCard(claim, i + 1, pending);
       cards.set(i + 1, card);
       claimsSection.appendChild(card);
     });
+    return true;
+  }
 
+  /**
+   * Places the page's numbered badges against the cards just drawn. Cards and badges are always
+   * rebuilt together — here, right after `renderCards` — so a badge's number can never outlive
+   * the card it opens. `stillMine` says whether the panel still shows what this call drew.
+   */
+  async function placeMarkers(record: SavedInspection, tabId: number, stillMine: () => boolean): Promise<void> {
     const started = performance.now();
+    let entry: TraceEntry;
     try {
       const [{ result: placed }] = await chrome.scripting.executeScript({
         target: { tabId },
         func: markClaims,
-        args: [target.blockId, claims.map((c, i) => ({ n: i + 1, quote: c.verifiedQuote, status: c.evidence.status }))],
+        args: [record.target.blockId, record.claims.map((c, i) => ({ n: i + 1, quote: c.verifiedQuote, status: c.evidence.status }))],
       });
-      if (myRun !== runId) return;
-      addTrace("Page markers", "done", `${placed ?? 0} of ${claims.length} placed`, performance.now() - started);
-      clearBtn.hidden = false;
+      entry = {
+        step: "Page markers",
+        state: "done",
+        detail: `${placed ?? 0} of ${record.claims.length} placed`,
+        ms: performance.now() - started,
+      };
     } catch (err) {
-      if (myRun === runId) addTrace("Page markers", "failed", pageAccessError(err));
+      entry = { step: "Page markers", state: "failed", detail: pageAccessError(err, "inspected") };
     }
+    if (!stillMine()) return;
+    trace(record, entry, true);
   }
 
   /**
    * Extracts claims from the reader's selection. Paid, and it needs a selection, so it only ever
-   * runs from a deliberate gesture — never from a tab switch.
+   * runs from a deliberate gesture — never from a tab switch. Nothing on screen changes until the
+   * capture has succeeded: an empty selection or an unscriptable page just reports itself.
    */
   async function inspectSelection(): Promise<void> {
-    const myRun = ++runId;
-    showRun++;
-    cancelInspect?.();
-    cancelInspect = null;
-    runTabId = null;
-    resetResults();
-
     let tabId: number;
     let target: InspectTarget | null;
     const started = performance.now();
@@ -668,91 +786,111 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
       const [injection] = await chrome.scripting.executeScript({ target: { tabId }, func: captureInspectTarget });
       target = injection?.result ?? null;
     } catch (err) {
-      setStatus(pageAccessError(err));
+      setStatus(pageAccessError(err, "inspected"));
       return;
     }
     // Nothing has been spent yet — the capture is local. If the reader has already moved to another
     // tab, stop here rather than paying for a passage they have left behind.
-    if (myRun !== runId || !isCurrentTab(tabId)) return;
-    shownTabId = tabId;
+    if (!isCurrentTab(tabId)) return;
     if (!target) {
       setStatus("Select a sentence or paragraph on the page first (at least a few words), or use Pick paragraph.");
       return;
     }
+    if (runs.has(tabId)) {
+      setStatus(RUNNING_HINT);
+      return;
+    }
 
-    tracerConfigured = (await getSourceTracerUrl()) !== null;
-    if (myRun !== runId) return;
-    addTrace(
-      "Capture (page)",
-      "done",
-      `${wordCount(target.text)} words · ${target.links.length} link${target.links.length === 1 ? "" : "s"}`,
-      performance.now() - started,
+    const record: SavedInspection = { tabId, target, claims: [], trace: [] };
+    const run: Run = { record, cancel: () => {} };
+    // Registered before anything awaits, so a second gesture can't slip in and start a second run.
+    runs.set(tabId, run);
+    // The tab's previous inspection stays in session storage until this run's claims replace it: if
+    // the run dies with the panel, reopening restores the badges the page still shows, not nothing.
+    inspections.set(tabId, record);
+    const current = () => runs.get(tabId) === run;
+    const draw = () => current() && onShownTab(tabId);
+
+    showRun++;
+    shownTabId = tabId;
+    resetResults();
+    if (pickTabId === tabId) void stopPicking();
+    trace(
+      record,
+      {
+        step: "Capture (page)",
+        state: "done",
+        detail: `${wordCount(target.text)} words · ${target.links.length} link${target.links.length === 1 ? "" : "s"}`,
+        ms: performance.now() - started,
+      },
+      true,
     );
     renderPassage(target);
-
     const localStart = performance.now();
     const sentenceCount = renderProvisional(target.text);
-    addTrace("First read (local heuristics)", "done", `${sentenceCount} sentences`, performance.now() - localStart);
-
+    trace(
+      record,
+      { step: "First read (local heuristics)", state: "done", detail: `${sentenceCount} sentences`, ms: performance.now() - localStart },
+      true,
+    );
     setStatus("Analyzing…");
-    const capturedTarget = target;
-    runTabId = tabId;
-    cancelInspect = startInspect(target, {
-      onTrace: (m: InspectTrace) => {
-        // A trace belongs to one run on one tab; it must never open a trace panel over another's.
-        if (myRun === runId && onShownTab(tabId)) addTrace(m.step, m.state, m.detail, m.ms);
+    updateToolbar();
+
+    // Results are always recorded against the tab they belong to — the spend already happened, so
+    // a reader who wandered off mid-run still finds them waiting on the way back. Only the drawing
+    // is conditional on that tab still being the one in front of them.
+    run.cancel = startInspect(target, {
+      onTrace: (m) => {
+        if (current()) trace(record, { step: m.step, state: m.state, detail: m.detail, ms: m.ms }, draw());
       },
-      // Results are always recorded against the tab they belong to — the spend already happened,
-      // so a reader who wandered off mid-run still finds them waiting on the way back. Only the
-      // rendering is conditional on that tab still being the one in front of them.
       onClaims: (m) => {
-        if (myRun !== runId) return;
-        if (m.error || !m.claims) {
-          if (!onShownTab(tabId)) return;
-          claimsSection.hidden = false;
-          claimsSection.replaceChildren(el("div", "text-xs text-red-300", m.error ?? "Couldn't analyze this passage."));
-          provisionalSection.querySelector("div")?.replaceChildren("First read · local heuristics only");
-          return;
+        if (!current()) return;
+        if (m.error || !m.claims) record.error = m.error ?? "Couldn't analyze this passage.";
+        else {
+          record.claims = m.claims;
+          persistInspection(record);
         }
-        const record: SavedInspection = { tabId, target: capturedTarget, claims: m.claims };
-        inspections.set(tabId, record);
-        persistInspection(record);
-        if (!onShownTab(tabId)) return;
+        if (!draw()) return;
         // This is the newest view of this tab; abandon any swap-in still resolving, or the cards
         // would be drawn twice.
-        showRun++;
-        void renderClaims(m.claims, capturedTarget, tabId, myRun);
+        const mine = ++showRun;
+        if (renderCards(record, tabId)) void placeMarkers(record, tabId, () => mine === showRun);
       },
       onSlop: (m) => {
-        if (myRun !== runId) return;
-        const record = inspections.get(tabId);
-        if (record) {
-          record.slop = { report: m.report, note: m.note };
-          persistInspection(record);
-        }
-        if (onShownTab(tabId)) renderSlop(m.report, m.note);
+        if (!current()) return;
+        record.slop = { report: m.report, note: m.note };
+        persistInspection(record);
+        if (draw()) renderSlop(m.report, m.note);
       },
       onSources: (m) => {
-        if (myRun !== runId) return;
-        const record = inspections.get(tabId);
-        if (record) {
-          record.sources = {
-            sourcesByQuote: m.sourcesByQuote,
-            contextsByQuote: m.contextsByQuote,
-            notCheckedByQuote: m.notCheckedByQuote,
-          };
-          persistInspection(record);
-        }
-        if (onShownTab(tabId)) renderAllSources(m);
+        if (!current()) return;
+        record.sources = { sourcesByQuote: m.sourcesByQuote, contextsByQuote: m.contextsByQuote, notCheckedByQuote: m.notCheckedByQuote };
+        persistInspection(record);
+        if (draw()) renderAllSources(record.sources);
       },
       onDone: () => {
-        if (myRun !== runId) return;
-        cancelInspect = null;
-        runTabId = null;
+        if (!current()) return;
+        runs.delete(tabId);
+        persistInspection(record);
         if (!onShownTab(tabId)) return;
-        setStatus(cards.size ? `Done — ${cards.size} claim${cards.size === 1 ? "" : "s"}. Click a badge on the page to jump to its card.` : "Done.");
+        setStatus(doneStatus(cards.size));
+        updateToolbar();
+      },
+      onDisconnect: () => {
+        // The service worker went away mid-run. Whatever landed stays; the reader is told rather
+        // than left on "Analyzing…" with Clear as the only way out.
+        if (!current()) return;
+        const lost = "Lost the connection to the extension before this finished.";
+        if (!record.claims?.length) record.error = lost;
+        runs.delete(tabId);
+        persistInspection(record);
+        if (!onShownTab(tabId)) return;
+        setStatus(record.claims?.length ? `${doneStatus(cards.size)} ${lost}` : lost);
+        updateToolbar();
       },
     });
+
+    tracerConfigured = (await getSourceTracerUrl()) !== null;
   }
 
   /** Takes the page out of pick mode, wherever it was armed. */
@@ -775,18 +913,16 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
       setPicking(tabId);
       setStatus("Hover the page — claim-bearing sentences get underlined. Click a paragraph to inspect it; Esc cancels.");
     } catch (err) {
-      setStatus(pageAccessError(err));
+      setStatus(pageAccessError(err, "inspected"));
     }
   }
 
+  /** Drops the shown tab's inspection — its run if one is going, its record, and the page's badges. */
   async function clearMarks(): Promise<void> {
     const tabId = shownTabId;
     if (tabId === null) return;
-    runId++;
     showRun++;
-    cancelInspect?.();
-    cancelInspect = null;
-    runTabId = null;
+    stopRun(tabId);
     await chrome.scripting.executeScript({ target: { tabId }, func: clearClaimMarks }).catch(() => {});
     forgetInspection(tabId);
     resetResults();
@@ -794,8 +930,9 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   }
 
   /**
-   * Puts `tabId`'s inspection on screen, or a clean empty state if it has none — on a tab switch,
-   * on a navigation, and when the panel is reopened with results still in session storage.
+   * Puts `tabId`'s inspection on screen — finished, still running, or failed — or a clean empty
+   * state if it has none. Runs on a tab switch, a navigation, a reload, and when the panel is
+   * reopened with results still in session storage.
    *
    * Re-running `markClaims` here is what keeps the page's numbered badges working: the card
    * elements are rebuilt from scratch on every swap-in, so the badges have to be re-placed against
@@ -811,7 +948,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     showOutline(tabId);
 
     let record = inspections.get(tabId) ?? persisted.get(tabId) ?? null;
-    if (record?.claims?.length) {
+    if (record) {
       // Valid only while the tab is still on the page it was taken from. In memory tab-state has
       // usually dropped it already; from session storage nothing has checked yet, and a tab that
       // navigated while the panel was closed must not get its old results handed back.
@@ -822,13 +959,11 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
       if (mine !== showRun) return;
       if (isSameDocument(url, record.target.url)) inspections.set(tabId, record);
       else {
+        stopRun(tabId);
         forgetInspection(tabId);
         record = null;
       }
-    } else {
-      record = null;
     }
-
     if (!record) {
       setStatus(CLAIMS_HINT);
       return;
@@ -837,14 +972,16 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     tracerConfigured = (await getSourceTracerUrl()) !== null;
     if (mine !== showRun) return;
 
+    const pending = runs.get(tabId)?.record === record;
     renderPassage(record.target);
-    await renderClaims(record.claims, record.target, tabId, runId);
-    if (mine !== showRun) return;
+    if (!record.claims.length && (pending || record.error)) renderProvisional(record.target.text);
+    renderTrace(record.trace);
     if (record.slop) renderSlop(record.slop.report, record.slop.note);
+    const hasCards = renderCards(record, tabId);
     if (record.sources) renderAllSources(record.sources);
-    setStatus(
-      `${record.claims.length} claim${record.claims.length === 1 ? "" : "s"}. Click a badge on the page to jump to its card.`,
-    );
+    setStatus(pending ? "Analyzing…" : doneStatus(record.claims.length));
+    updateToolbar();
+    if (hasCards) await placeMarkers(record, tabId, () => mine === showRun);
   }
 
   pickBtn.addEventListener("click", togglePick);
@@ -857,7 +994,8 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     if (sender.id !== chrome.runtime.id || sender.tab?.id === undefined) return;
     const fromTab = sender.tab.id;
     if (message?.type === "HT_SELECTION" && fromTab === selectionTabId) {
-      setCanInspect(message.hasSelection === true);
+      hasSelection = message.hasSelection === true;
+      updateToolbar();
     } else if (message?.type === "HT_PICKED" && fromTab === pickTabId) {
       setPicking(null);
       options.activate();
@@ -887,12 +1025,12 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   showOnPageLabel.append(showOnPage, el("span", "", "Show labels on page"));
   outlineToolbar.append(outlineBtn, showOnPageLabel);
 
-  const outlineStatus = el("p", "text-xs text-muted min-h-[1em]", OUTLINE_HINT);
+  const outlineStatus = el("p", STATUS, OUTLINE_HINT);
   const legend = el("div", "flex flex-wrap gap-1.5");
   const tree = el("div", "flex flex-col font-mono text-xs");
   const outlineFooter = el(
     "p",
-    "text-[11px] text-muted border-t border-neutral-800 pt-3",
+    `${NOTE} border-t border-neutral-800 pt-3`,
     "What we could not check: text inside iframes and images isn't read, and labels come from each block's " +
       "text plus page-structure signals — a reading, not a guarantee.",
   );
@@ -907,10 +1045,9 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     status: string;
   }
 
-  let outlineRun = 0;
-  /** The tab an outline build is running for, so the button only reads busy on that tab. */
-  let outlineBusyTabId: number | null = null;
   const outlines = createTabStore<OutlineState>();
+  /** Tabs with a build going. One per tab, and a build on one tab never touches another's. */
+  const outlineBusy = new Set<number>();
 
   function setOutlineStatus(tabId: number, text: string): void {
     const state = outlines.get(tabId);
@@ -931,29 +1068,26 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
       const count = counts.get(label);
       if (!count) continue;
       const off = hidden.has(label);
-      const chip = el("button", `${CHIP} ${OUTLINE_CHIP[label]} ${off ? "opacity-40 line-through" : ""}`, `${OUTLINE_LABEL_TEXT[label]} ${count}`);
-      chip.title = off ? "Show these blocks" : "Hide these blocks";
-      chip.addEventListener("click", () => {
+      const toggle = el("button", `${OUTLINE_CHIP[label]} ${off ? "opacity-40 line-through" : ""}`, `${OUTLINE_LABEL_TEXT[label]} ${count}`);
+      toggle.title = off ? "Show these blocks" : "Hide these blocks";
+      toggle.addEventListener("click", () => {
         if (off) hidden.delete(label);
         else hidden.add(label);
         renderOutline(tabId);
       });
-      legend.appendChild(chip);
+      legend.appendChild(toggle);
     }
 
     tree.replaceChildren();
     for (const block of blocks) {
       if (hidden.has(block.label)) continue;
-      const row = el(
-        "button",
-        "flex items-center gap-2 w-full text-left py-1 pr-1 rounded hover:bg-neutral-800 min-w-0",
-      );
+      const row = el("button", "flex items-center gap-2 w-full text-left py-1 pr-1 rounded hover:bg-neutral-800 min-w-0");
       row.style.paddingLeft = `${4 + block.depth * 14}px`;
       row.title = block.text;
       const isHeading = /^h[1-6]$/.test(block.tag);
       row.append(
         el("span", "shrink-0 text-muted", `<${block.tag}>`),
-        el("span", `${CHIP} shrink-0 font-sans ${OUTLINE_CHIP[block.label]}`, OUTLINE_LABEL_TEXT[block.label]),
+        el("span", `${OUTLINE_CHIP[block.label]} shrink-0 font-sans`, OUTLINE_LABEL_TEXT[block.label]),
         el("span", `truncate font-sans ${isHeading ? "text-neutral-100 font-medium" : "text-neutral-300"}`, block.text),
       );
       row.addEventListener("click", () => {
@@ -969,11 +1103,12 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   /** Puts `tabId`'s outline on screen, or the empty state. Never starts a build — that one is paid. */
   function showOutline(tabId: number | null): void {
     const state = outlines.get(tabId);
+    const busy = tabId !== null && outlineBusy.has(tabId);
     showOnPage.checked = state?.showOnPage ?? false;
     showOnPage.disabled = !state;
     outlineFooter.hidden = !state;
-    outlineBtn.disabled = tabId !== null && outlineBusyTabId === tabId;
-    outlineStatus.textContent = state?.status || OUTLINE_HINT;
+    outlineBtn.disabled = busy;
+    outlineStatus.textContent = state?.status || (busy ? "Reading the page…" : OUTLINE_HINT);
     renderOutline(tabId);
   }
 
@@ -991,13 +1126,17 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
    * runs from a press of "Outline this page" — switching to a tab shows what it already has.
    */
   async function buildOutline(): Promise<void> {
-    const myRun = ++outlineRun;
-    let tabId: number | null = null;
+    let tabId: number;
     try {
       tabId = getCurrentTabId() ?? (await getActiveTabId());
-      outlineBusyTabId = tabId;
-      outlineBtn.disabled = true;
-
+    } catch (err) {
+      outlineStatus.textContent = pageAccessError(err, "outlined");
+      return;
+    }
+    if (outlineBusy.has(tabId)) return;
+    outlineBusy.add(tabId);
+    if (isCurrentTab(tabId)) outlineBtn.disabled = true;
+    try {
       const previous = outlines.get(tabId);
       if (previous?.showOnPage) {
         // Take the old outlines off this page before re-reading it.
@@ -1008,7 +1147,6 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
       if (isCurrentTab(tabId)) outlineStatus.textContent = "Reading the page…";
 
       const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: extractOutline });
-      if (myRun !== outlineRun) return;
       if (!result || !result.blocks.length) {
         outlines.forget(tabId);
         if (isCurrentTab(tabId)) {
@@ -1041,7 +1179,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
       );
       // A gone state means the tab navigated or closed mid-call: the labels describe a page that
       // is no longer there, so they are dropped rather than shown against whatever replaced it.
-      if (myRun !== outlineRun || outlines.get(tabId) !== state) return;
+      if (outlines.get(tabId) !== state) return;
       if (reply.error || !reply.labels) {
         setOutlineStatus(tabId, `${state.blocks.length} blocks · labels are from page structure only (${reply.error ?? "no reply"}).`);
         return;
@@ -1057,14 +1195,10 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
       const important = state.blocks.filter((b) => b.label === "important").length;
       setOutlineStatus(tabId, `${state.blocks.length} blocks · ${important} important. Click a row to find it on the page.`);
     } catch (err) {
-      if (myRun === outlineRun && (tabId === null || isCurrentTab(tabId))) {
-        outlineStatus.textContent = pageAccessError(err);
-      }
+      if (isCurrentTab(tabId)) outlineStatus.textContent = pageAccessError(err, "outlined");
     } finally {
-      if (myRun === outlineRun) {
-        outlineBusyTabId = null;
-        outlineBtn.disabled = false;
-      }
+      outlineBusy.delete(tabId);
+      if (isCurrentTab(tabId)) outlineBtn.disabled = false;
     }
   }
 
@@ -1084,27 +1218,28 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     void showTab(tabId);
   });
 
-  // A fresh document has no watcher in it, and showTab's injection during the navigation itself
-  // may have landed in the page being replaced.
-  onTabLoaded((tabId) => void watchSelectionOn(tabId));
+  onTabLoaded((tabId) => {
+    // A reload keeps the URL, so nothing evicted this tab's inspection — but the fresh document
+    // has no badges in it, and no selection watcher either. Redraw cards and badges together.
+    if (onShownTab(tabId) && inspections.get(tabId)?.claims.length) void showTab(tabId);
+    else void watchSelectionOn(tabId);
+  });
 
   onTabNavigated((tabId) => {
     // The page all of this was about is gone. Call off a run still going for it rather than
-    // spending the rest of it on a passage that no longer exists, and drop the stored copy so
+    // showing the rest of it against a passage that no longer exists, and drop the stored copy so
     // reopening the panel can't resurrect it.
-    if (runTabId === tabId) {
-      runId++;
-      cancelInspect?.();
-      cancelInspect = null;
-      runTabId = null;
-    }
+    stopRun(tabId);
     forgetInspection(tabId);
     void showTab(tabId);
   });
 
   // An inspection outlives the panel, but not the tab it describes. Closing the tab takes the page
   // with it, so the copy in session storage has nothing left to be about.
-  onTabClosed((tabId) => forgetInspection(tabId));
+  onTabClosed((tabId) => {
+    stopRun(tabId);
+    forgetInspection(tabId);
+  });
 
   void (async () => {
     // Inspections survive the panel closing; each is checked against its tab's current page before
@@ -1122,7 +1257,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
         dropped = true;
         continue;
       }
-      persisted.set(tabId, record);
+      persisted.set(tabId, { ...record, trace: record.trace ?? [] });
     }
     if (dropped) writePersisted();
     try {
