@@ -9,6 +9,8 @@
  *              absence of one is never an all-clear.
  */
 
+import { limit, type Limit } from "./limits";
+
 // ---- Raw signal shapes (the contract with src/content/application-signals.ts) -----------------
 
 export interface RawFormField {
@@ -115,7 +117,7 @@ export interface ApplicationSection {
 export interface ApplicationReport {
   host: string;
   sections: ApplicationSection[];
-  notChecked: string[];
+  notChecked: Limit[];
   findingCount: number;
 }
 
@@ -754,36 +756,61 @@ function storageFindings(signals: RawApplicationSignals): Finding[] {
   return findings;
 }
 
-function notCheckedLines(signals: RawApplicationSignals): string[] {
-  const lines = [
-    "Network traffic is not watched. This reads the page as it stands right now, so anything loaded after the scan, " +
-      "or served from the site's own domain, does not appear here.",
-    "The tracker list is a short hand-written set of well-known domains. A domain missing from it may still be tracking you.",
-    "Dark patterns are matched by wording and by measured size, colour and position. Manipulation phrased in words we " +
-      "do not recognise, or carried in an image or video, is missed.",
-    "What the site does with what you submit — who it shares with, how long it keeps it — is not visible from the page. " +
-      "No privacy policy is read.",
-    "HttpOnly cookies cannot be read from a page, so the cookie count is a floor. Cookie values are never read.",
+function notCheckedLines(signals: RawApplicationSignals): Limit[] {
+  const lines: Limit[] = [
+    limit(
+      "no network traffic",
+      "Network traffic is not watched. This reads the page as it stands right now, so anything loaded after the scan, " +
+        "or served from the site's own domain, does not appear here.",
+    ),
+    limit(
+      "tracker list is partial",
+      "The tracker list is a short hand-written set of well-known domains. A domain missing from it may still be tracking you.",
+    ),
+    limit(
+      "unrecognised wording",
+      "Dark patterns are matched by wording and by measured size, colour and position. Manipulation phrased in words we " +
+        "do not recognise, or carried in an image or video, is missed.",
+    ),
+    limit(
+      "no policy is read",
+      "What the site does with what you submit — who it shares with, how long it keeps it — is not visible from the page. " +
+        "No privacy policy is read.",
+    ),
+    limit(
+      "httpOnly cookies",
+      "HttpOnly cookies cannot be read from a page, so the cookie count is a floor. Cookie values are never read.",
+    ),
   ];
   if (signals.crossOriginFrames > 0) {
     const frames = signals.crossOriginFrames;
     lines.push(
-      `${plural(frames, "frame")} on this page ${frames === 1 ? "comes" : "come"} from another site and cannot be read ` +
-        `into, so any form, tracker or dark pattern inside ${frames === 1 ? "it" : "them"} is invisible here.`,
+      limit(
+        `${plural(frames, "frame")} unreadable`,
+        `${plural(frames, "frame")} on this page ${frames === 1 ? "comes" : "come"} from another site and cannot be read ` +
+          `into, so any form, tracker or dark pattern inside ${frames === 1 ? "it" : "them"} is invisible here.`,
+      ),
     );
   }
   const unsupported = signals.permissions.filter((p) => p.state !== "granted" && p.state !== "denied" && p.state !== "prompt");
   if (unsupported.length) {
-    lines.push(`Permission state could not be read for: ${unsupported.map((p) => p.name).join(", ")}.`);
+    lines.push(
+      limit("permission state unknown", `Permission state could not be read for: ${unsupported.map((p) => p.name).join(", ")}.`),
+    );
   }
   if (signals.truncated.length) {
-    lines.push(`Very large page: only the first batch of ${signals.truncated.join(", ")} was examined.`);
+    lines.push(limit("very large page", `Very large page: only the first batch of ${signals.truncated.join(", ")} was examined.`));
   }
   lines.push(
-    "A box the page ticks with JavaScript after loading looks the same to you as one ticked in its HTML, but only the " +
-      "second is counted here as pre-ticked.",
+    limit(
+      "boxes ticked by script",
+      "A box the page ticks with JavaScript after loading looks the same to you as one ticked in its HTML, but only the " +
+        "second is counted here as pre-ticked.",
+    ),
   );
-  lines.push("Forms and prompts that only appear after a click, a scroll or a login are not seen by this scan.");
+  lines.push(
+    limit("anything behind a click", "Forms and prompts that only appear after a click, a scroll or a login are not seen by this scan."),
+  );
   return lines;
 }
 

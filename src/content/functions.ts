@@ -678,3 +678,65 @@ export function applyOutlineLabels(labels: { id: string; label: string }[], show
     `[data-ht-outline-label="boilerplate"] { outline: 1px dotted #737373 !important; outline-offset: 3px !important; }`;
   document.head.appendChild(style);
 }
+
+/**
+ * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. Finds the
+ * form the Security panel read as number `index`, confirms it still posts where the panel said,
+ * scrolls to it and outlines it. Nothing is stamped on the page during the scan, so the form is
+ * located the same way it was counted: by walking the document and every open shadow root in the
+ * same order the collector does.
+ *
+ * Returns "changed" rather than highlighting when the destination no longer matches. A security
+ * panel pointing at the wrong form is worse than one admitting the page moved under it.
+ */
+export function highlightSecurityForm(index: number, expectedAction: string): "shown" | "changed" | "missing" {
+  const FLASH_CLASS = "__ht-form-flash";
+  const STYLE_ID = "__ht-form-flash-style";
+  const MAX_ROOTS = 5000;
+
+  if (!document.getElementById(STYLE_ID)) {
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent =
+      `.${FLASH_CLASS} { outline: 3px solid #ef4444 !important; outline-offset: 3px; ` +
+      `animation: __ht-form-flash-anim 2s ease-out; } ` +
+      `@keyframes __ht-form-flash-anim { 0%, 100% { outline-color: #ef4444; } 50% { outline-color: rgba(239,68,68,.2); } }`;
+    document.head.appendChild(style);
+  }
+
+  const roots: (Document | ShadowRoot)[] = [document];
+  for (let i = 0; i < roots.length && roots.length < MAX_ROOTS; i += 1) {
+    for (const el of Array.from(roots[i].querySelectorAll("*"))) {
+      const shadow = el.shadowRoot;
+      if (shadow) {
+        roots.push(shadow);
+        if (roots.length >= MAX_ROOTS) break;
+      }
+    }
+  }
+  const forms: HTMLFormElement[] = [];
+  for (const root of roots) {
+    for (const el of Array.from(root.querySelectorAll("form"))) forms.push(el as HTMLFormElement);
+  }
+
+  const form = forms[index];
+  if (!form) return "missing";
+
+  // Resolved exactly as the collector resolves it: an absent action means the page's own URL.
+  const raw = form.getAttribute("action");
+  let action = "";
+  try {
+    const url = new URL(raw === null ? location.href : raw, document.baseURI);
+    action = url.protocol === "http:" || url.protocol === "https:" ? url.href : "";
+  } catch {
+    action = "";
+  }
+  if (action !== expectedAction) return "changed";
+
+  form.scrollIntoView({ behavior: "smooth", block: "center" });
+  form.classList.remove(FLASH_CLASS);
+  void form.offsetWidth; // force reflow so the outline restarts on repeat clicks
+  form.classList.add(FLASH_CLASS);
+  setTimeout(() => form.classList.remove(FLASH_CLASS), 2100);
+  return "shown";
+}

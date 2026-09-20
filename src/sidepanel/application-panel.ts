@@ -2,18 +2,13 @@ import { collectApplicationSignals } from "../content/application-signals";
 import { getActiveTabId } from "../lib/active-tab";
 import { buildApplicationReport } from "../lib/application-heuristics";
 import type { ApplicationReport, ApplicationSection, Finding, RawApplicationSignals } from "../lib/application-heuristics";
+import type { Limit } from "../lib/limits";
 import { createTabStore, getCurrentTabId, onTabActivated, onTabNavigated } from "../lib/tab-state";
 import { whenVisible } from "../lib/panel-visibility";
 
-const CHIP = "inline-flex items-center px-1.5 py-0.5 rounded border text-[11px] leading-none";
-const SECTION_LABEL = "text-[11px] uppercase tracking-wide text-neutral-500";
+const SECTION_LABEL = "text-[11px] uppercase tracking-wide text-muted";
 const BTN =
   "inline-flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 disabled:hover:bg-neutral-800 border border-neutral-600 rounded text-neutral-100";
-
-const BASIS_CHIP: Record<Finding["basis"], string> = {
-  observed: `${CHIP} bg-neutral-800 text-neutral-300 border-neutral-600`,
-  pattern: `${CHIP} bg-amber-950 text-amber-300 border-amber-800`,
-};
 
 const BASIS_LABEL: Record<Finding["basis"], string> = {
   observed: "Read off the page",
@@ -41,46 +36,83 @@ function pageAccessError(err: unknown): string {
   return message || "Couldn't read this page.";
 }
 
+/**
+ * One finding as a label row: its title, and a count of the evidence behind it. The sentence that
+ * explains it is a tap away rather than gone — a panel that shows only counts has stopped saying
+ * why it counted them.
+ */
 function renderFinding(finding: Finding): HTMLElement {
-  const card = el("div", "flex flex-col gap-2 rounded bg-neutral-800/70 border border-neutral-700 p-3");
+  const row = el("div", "flex flex-col");
 
-  const top = el("div", "flex items-start justify-between gap-2");
-  top.append(el("div", "text-neutral-100 font-medium leading-snug min-w-0", finding.title));
-  const basis = el("span", `shrink-0 ${BASIS_CHIP[finding.basis]}`, BASIS_LABEL[finding.basis]);
-  basis.title = BASIS_TITLE[finding.basis];
-  top.appendChild(basis);
-  card.appendChild(top);
+  const head = el(
+    "button",
+    "flex items-baseline justify-between gap-2 w-full text-left py-0.5 pl-6 pr-3 hover:bg-neutral-800/50",
+  );
+  const title = el("span", `text-[11px] leading-snug ${finding.basis === "pattern" ? "text-amber-300" : "text-neutral-300"}`, finding.title);
+  const count = el(
+    "span",
+    "shrink-0 text-[11px] text-neutral-400 font-mono tabular-nums",
+    finding.evidence.length ? String(finding.evidence.length) : "\u2014",
+  );
+  head.append(title, count);
+  head.title = BASIS_TITLE[finding.basis];
+  row.appendChild(head);
 
-  card.appendChild(el("p", "text-xs text-neutral-400 leading-relaxed", finding.explanation));
-
-  if (finding.evidence.length) {
-    const evidence = el("div", "flex flex-col gap-1 pt-1 border-t border-neutral-700/60");
-    evidence.appendChild(el("div", SECTION_LABEL, "On this page"));
-    for (const item of finding.evidence) {
-      const row = el("div", "text-xs text-neutral-300 leading-snug break-words");
-      row.appendChild(el("span", "", item.text));
-      if (item.detail) row.appendChild(el("span", "text-neutral-500", ` — ${item.detail}`));
-      evidence.appendChild(row);
-    }
-    card.appendChild(evidence);
+  const body = el("div", "flex flex-col gap-1 pl-6 pr-3 pb-2 pt-1");
+  body.hidden = true;
+  body.append(el("p", "text-[11px] text-neutral-400 leading-relaxed", finding.explanation));
+  for (const item of finding.evidence) {
+    const line = el("div", "text-[11px] text-neutral-300 leading-snug break-words");
+    line.append(el("span", "", item.text));
+    if (item.detail) line.append(el("span", "text-muted", ` ${"\u2014"} ${item.detail}`));
+    body.appendChild(line);
   }
-  return card;
+  body.append(el("p", "text-[10px] text-muted leading-snug pt-0.5", BASIS_LABEL[finding.basis]));
+  row.appendChild(body);
+
+  head.addEventListener("click", () => {
+    body.hidden = !body.hidden;
+  });
+  return row;
 }
 
-function renderSection(section: ApplicationSection): HTMLElement {
-  const wrap = el("div", "flex flex-col gap-2");
-  const heading = el("div", "flex items-baseline justify-between gap-2");
+/** One band of the label: its heading, its count, and its findings as rows beneath it. */
+function renderSection(section: ApplicationSection, first: boolean): HTMLElement {
+  const band = el("div", `flex flex-col ${first ? "" : "border-t border-neutral-700"}`);
+
+  const heading = el("div", "flex items-baseline justify-between gap-2 px-3 pt-2 pb-1");
   heading.append(
-    el("div", SECTION_LABEL, section.title),
-    el("span", "text-[11px] text-neutral-500", section.findings.length ? String(section.findings.length) : "nothing found"),
+    el("span", "text-[11px] font-semibold uppercase tracking-wide text-neutral-100", section.title),
+    el("span", "text-sm font-semibold text-neutral-100 tabular-nums", String(section.findings.length)),
   );
-  wrap.appendChild(heading);
+  band.appendChild(heading);
 
   if (!section.findings.length) {
-    wrap.appendChild(el("p", "text-xs text-neutral-500 leading-snug", section.emptyNote));
-    return wrap;
+    const empty = el("div", "text-[11px] text-muted leading-snug pl-6 pr-3 pb-2", "nothing matched");
+    empty.title = section.emptyNote;
+    band.appendChild(empty);
+    return band;
   }
-  for (const finding of section.findings) wrap.appendChild(renderFinding(finding));
+  for (const finding of section.findings) band.appendChild(renderFinding(finding));
+  band.appendChild(el("div", "pb-1.5"));
+  return band;
+}
+
+/** The limits, as a strip of chips. Each one keeps its full sentence as the thing it says on hover. */
+function renderLimits(limits: readonly Limit[]): HTMLElement {
+  const wrap = el("div", "flex flex-col gap-1.5 pt-3 border-t border-neutral-800");
+  wrap.append(el("div", SECTION_LABEL, "Blind spots"));
+  const strip = el("div", "flex flex-wrap gap-1.5");
+  for (const entry of limits) {
+    const chip = el(
+      "span",
+      "inline-flex items-center px-1.5 py-0.5 rounded border border-dashed border-neutral-600 text-neutral-400 text-[11px] leading-snug",
+      entry.label,
+    );
+    chip.title = entry.detail;
+    strip.appendChild(chip);
+  }
+  wrap.appendChild(strip);
   return wrap;
 }
 
@@ -108,16 +140,22 @@ export function mountApplicationPanel(container: HTMLElement): void {
   container.appendChild(root);
 
   const header = el("div", "flex flex-col gap-1.5");
-  header.append(el("h1", "text-neutral-100 font-medium", "Application — what is this site doing with me?"));
-  header.append(
-    el(
-      "p",
-      "text-xs text-neutral-400 leading-relaxed",
-      "Reads the page in front of you: what it asks you to type, whose code it loads, where it leans on you to say yes, " +
-        "and what it has already stored in your browser. Everything is computed on your machine — nothing about this " +
-        "page is sent anywhere, and no value you have typed is read.",
-    ),
+  const titleRow = el("div", "flex items-baseline justify-between gap-2");
+  titleRow.append(el("h1", "text-neutral-100 font-medium", "Application"));
+  const aboutBtn = el("button", "text-[11px] text-neutral-400 hover:text-neutral-200 px-1 py-0.5", "How this reads the page");
+  titleRow.appendChild(aboutBtn);
+  const about = el(
+    "p",
+    "text-xs text-neutral-400 leading-relaxed",
+    "Reads the page in front of you: what it asks you to type, whose code it loads, where it leans on you to say yes, " +
+      "and what it has already stored in your browser. Everything is computed on your machine — nothing about this " +
+      "page is sent anywhere, and no value you have typed is read.",
   );
+  about.hidden = true;
+  aboutBtn.addEventListener("click", () => {
+    about.hidden = !about.hidden;
+  });
+  header.append(titleRow, about);
   root.appendChild(header);
 
   const toolbar = el("div", "flex items-center gap-2");
@@ -125,19 +163,17 @@ export function mountApplicationPanel(container: HTMLElement): void {
   toolbar.appendChild(scanBtn);
   root.appendChild(toolbar);
 
-  const status = el("p", "text-xs text-neutral-500 min-h-[1em]", "Nothing scanned yet.");
+  const status = el("p", "text-xs text-muted min-h-[1em]", "Nothing scanned yet.");
   root.appendChild(status);
 
-  const scanned = el("div", "flex flex-col gap-1");
-  scanned.hidden = true;
-  root.appendChild(scanned);
+  // The label itself: one bordered block, a heavy rule under its head, a thin rule between bands.
+  const label = el("div", "flex flex-col border border-neutral-700 rounded overflow-hidden");
+  label.hidden = true;
+  root.appendChild(label);
 
-  const sectionsWrap = el("div", "flex flex-col gap-5");
-  root.appendChild(sectionsWrap);
-
-  const footer = el("div", "flex flex-col gap-1.5 pt-3 border-t border-neutral-800");
-  footer.hidden = true;
-  root.appendChild(footer);
+  const limitsWrap = el("div", "flex flex-col");
+  limitsWrap.hidden = true;
+  root.appendChild(limitsWrap);
 
   const views = createTabStore<ApplicationView>();
   /** Discards a scan whose answer arrived after the reader moved on, the way the inspector does. */
@@ -145,39 +181,58 @@ export function mountApplicationPanel(container: HTMLElement): void {
 
   /** Takes the previous tab's findings off the screen so nothing stale is left under a new host. */
   function clearOutput(): void {
-    scanned.hidden = true;
-    sectionsWrap.replaceChildren();
-    footer.hidden = true;
+    label.replaceChildren();
+    label.hidden = true;
+    limitsWrap.replaceChildren();
+    limitsWrap.hidden = true;
   }
 
   function render({ report, signals }: ApplicationView): void {
-    scanned.replaceChildren(
-      el("div", SECTION_LABEL, "Scanned"),
-      el("div", "text-xs text-neutral-100 font-mono break-all", report.host),
+    const patterns = report.sections.flatMap((section) => section.findings).filter((finding) => finding.basis === "pattern").length;
+
+    const head = el("div", "flex flex-col gap-0.5 px-3 pt-2.5 pb-2 border-b-4 border-neutral-300");
+    head.append(
+      el("div", "text-xs font-semibold uppercase tracking-widest text-neutral-100", "What this page does"),
+      el("div", "text-[11px] font-mono text-neutral-400 break-all", report.host),
+    );
+
+    const meta = el("div", "flex items-baseline justify-between gap-2 px-3 py-1.5 border-b border-neutral-700");
+    meta.append(
       el(
-        "div",
-        "text-[11px] text-neutral-500",
-        `${signals.formCount} form${signals.formCount === 1 ? "" : "s"} · ${signals.fields.length} input${signals.fields.length === 1 ? "" : "s"} · ` +
-          `${signals.resources.length} loaded resource${signals.resources.length === 1 ? "" : "s"} · ${report.findingCount} finding${report.findingCount === 1 ? "" : "s"}`,
+        "span",
+        "text-xs text-neutral-300",
+        `${report.findingCount} finding${report.findingCount === 1 ? "" : "s"} across ${report.sections.length} areas`,
+      ),
+      el(
+        "span",
+        "text-[11px] text-neutral-400 tabular-nums",
+        `${signals.fields.length} input${signals.fields.length === 1 ? "" : "s"} ${"\u00b7"} ${signals.resources.length} resource${signals.resources.length === 1 ? "" : "s"}`,
       ),
     );
-    scanned.hidden = false;
 
-    sectionsWrap.replaceChildren();
-    for (const section of report.sections) sectionsWrap.appendChild(renderSection(section));
+    const bands = report.sections.map((section, index) => renderSection(section, index === 0));
 
-    footer.replaceChildren(el("div", SECTION_LABEL, "What we could not check"));
-    for (const line of report.notChecked) {
-      footer.appendChild(el("p", "text-[11px] text-neutral-500 leading-snug", line));
-    }
-    footer.appendChild(
+    // The basis chip stopped repeating on every finding; the count of guesses is stated once.
+    const basis = el("div", "flex items-center justify-between gap-2 px-3 py-2 border-t-4 border-neutral-300");
+    const basisLabel = el("span", "text-[11px] text-neutral-400 leading-snug", "Matched a pattern, not proof");
+    basisLabel.title = BASIS_TITLE.pattern;
+    basis.append(
+      basisLabel,
+      el("span", "text-[11px] font-semibold text-neutral-100 tabular-nums", `${patterns} of ${report.findingCount}`),
+    );
+
+    label.replaceChildren(head, meta, ...bands, basis);
+    label.hidden = false;
+
+    limitsWrap.replaceChildren(renderLimits(report.notChecked));
+    limitsWrap.append(
       el(
         "p",
-        "text-[11px] text-neutral-500 leading-snug pt-1",
+        "text-[11px] text-muted leading-snug pt-2",
         "Findings describe what the page does, never whether the site can be trusted. Nothing here is a verdict.",
       ),
     );
-    footer.hidden = false;
+    limitsWrap.hidden = false;
   }
 
   /** Still the tab the reader is looking at? Null means the panel has not resolved one yet. */

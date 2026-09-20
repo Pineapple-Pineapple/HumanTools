@@ -53,7 +53,7 @@ gptzeroRow.className = "flex flex-col gap-1 text-sm text-neutral-300 pt-3 border
 const gptzeroTitle = document.createElement("span");
 gptzeroTitle.textContent = "GPTZero API key (optional)";
 const gptzeroHint = document.createElement("span");
-gptzeroHint.className = "text-xs text-neutral-500";
+gptzeroHint.className = "text-xs text-muted";
 gptzeroHint.textContent =
   "Enables the Inspector's Slop Check, which sends the inspected passage to GPTZero for an AI-text probability.";
 const gptzeroInput = document.createElement("input");
@@ -67,7 +67,7 @@ sourceTracerRow.className = "flex flex-col gap-1 text-sm text-neutral-300 pt-3 b
 const sourceTracerTitle = document.createElement("span");
 sourceTracerTitle.textContent = "Source Tracer endpoint (optional)";
 const sourceTracerHint = document.createElement("span");
-sourceTracerHint.className = "text-xs text-neutral-500";
+sourceTracerHint.className = "text-xs text-muted";
 sourceTracerHint.textContent = "Cloudflare Worker URL for independently finding and checking primary sources. Vendor credentials stay on the Worker.";
 const sourceTracerInput = document.createElement("input");
 sourceTracerInput.type = "url";
@@ -82,7 +82,7 @@ saveBtn.className =
   "self-start px-3 py-1.5 bg-amber-600 hover:bg-amber-500 rounded text-neutral-950 font-medium";
 
 const statusEl = document.createElement("p");
-statusEl.className = "text-xs text-neutral-500 min-h-[1em]";
+statusEl.className = "text-xs text-muted min-h-[1em]";
 
 app.append(heading, note, providerRows.openai.el, providerRows.openrouter.el, gptzeroRow, sourceTracerRow, saveBtn, statusEl);
 

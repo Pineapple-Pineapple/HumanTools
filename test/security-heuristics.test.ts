@@ -5,12 +5,18 @@ import {
   effectiveDomain,
   emptyFindingsMessage,
   findingsSummary,
+  groupAsks,
   hasPunycodeLabel,
   hostFromLinkText,
   isUrlShortener,
   readSecuritySignals,
 } from "../src/lib/security-heuristics";
 import type { FieldSignal, FormSignal, LinkSignal, SecuritySignals } from "../src/lib/security-heuristics";
+
+import type { Limit } from "../src/lib/limits";
+
+/** The disclosure as prose: the chips carry short labels, the sentences carry the admission. */
+const details = (limits: readonly Limit[]): string => limits.map((entry) => entry.detail).join(" ");
 
 function field(partial: Partial<FieldSignal> = {}): FieldSignal {
   return { tag: "input", type: "text", name: "", id: "", autocomplete: "", placeholder: "", ariaLabel: "", ...partial };
@@ -89,7 +95,7 @@ describe("a page with nothing wrong", () => {
 
   it("still says what it could not check", () => {
     expect(reading.notChecked.length).toBeGreaterThan(0);
-    expect(reading.notChecked.join(" ")).toContain("after this snapshot");
+    expect(details(reading.notChecked)).toContain("after this snapshot");
   });
 
   /**
@@ -98,7 +104,7 @@ describe("a page with nothing wrong", () => {
    * exists and naming the gap only advertises it.
    */
   it("does not keep a limitation that no longer holds", () => {
-    const text = reading.notChecked.join(" ").toLowerCase();
+    const text = details(reading.notChecked).toLowerCase();
     for (const gone of ["certificate", "padlock", "cross-origin frame", "shadow root", "canvas", "short built-in suffix", "not decoded", "who owns this domain"]) {
       expect(text).not.toContain(gone);
     }
@@ -352,9 +358,9 @@ describe("frames", () => {
 
   it("names the frames that returned nothing, and stays quiet when they all answered", () => {
     const some = buildNotChecked(signals({ frameCount: 3 }), [paymentFrame()]);
-    expect(some.some((line) => line.includes("2 frames that returned nothing"))).toBe(true);
+    expect(some.some((line) => line.detail.includes("2 frames that returned nothing"))).toBe(true);
     const all = buildNotChecked(signals({ frameCount: 1 }), [paymentFrame()]);
-    expect(all.some((line) => line.includes("returned nothing"))).toBe(false);
+    expect(all.some((line) => line.detail.includes("returned nothing"))).toBe(false);
   });
 });
 
@@ -419,7 +425,7 @@ describe("wording", () => {
       expect(finding.evidence.length).toBeGreaterThan(0);
     }
     expect(findingsSummary(reading.findings)).not.toMatch(REASSURANCE);
-    expect(reading.notChecked.join(" ")).not.toMatch(REASSURANCE);
+    expect(details(reading.notChecked)).not.toMatch(REASSURANCE);
   });
 
   it("orders findings by severity without summing them", () => {
@@ -463,12 +469,127 @@ describe("helpers", () => {
 
   it("admits per-run limits in what it could not check", () => {
     const lines = buildNotChecked(signals({ linksTruncated: true, linkCount: 1200, links: [link()], notCollected: ["A frame."] }));
-    expect(lines.some((line) => line.includes("1200"))).toBe(true);
-    expect(lines).toContain("A frame.");
+    expect(lines.some((line) => line.detail.includes("1200"))).toBe(true);
+    expect(lines.some((line) => line.detail === "A frame.")).toBe(true);
   });
 
   it("says nothing about truncation when nothing was truncated", () => {
     const lines = buildNotChecked(signals({ linkCount: 4000, links: Array.from({ length: 4000 }, () => link()) }));
-    expect(lines.some((line) => line.includes("Links past"))).toBe(false);
+    expect(lines.some((line) => line.detail.includes("Links past"))).toBe(false);
+  });
+});
+
+describe("grouping what a page asks for", () => {
+  it("puts every value one form collects into a single entry, in the order it asks", () => {
+    const reading = readSecuritySignals(
+      signals({
+        forms: [
+          form({
+            label: "Checkout",
+            fields: [field({ type: "password" }), field({ autocomplete: "cc-number" }), field({ type: "email" })],
+          }),
+        ],
+      }),
+    );
+
+    const groups = groupAsks(reading.asks);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].formLabel).toBe("Checkout");
+    expect(groups[0].labels).toEqual(["A password", "A payment card number", "An email address"]);
+    expect(groups[0].offSite).toBe(false);
+  });
+
+  it("keeps two forms apart even when they post to the same address", () => {
+    const reading = readSecuritySignals(
+      signals({
+        forms: [
+          form({ label: "Sign in", fields: [field({ type: "password" })] }),
+          form({ label: "Newsletter", fields: [field({ type: "email" })] }),
+        ],
+      }),
+    );
+
+    const groups = groupAsks(reading.asks);
+    expect(groups.map((group) => group.formLabel)).toEqual(["Sign in", "Newsletter"]);
+  });
+
+  it("marks a form that posts to another origin as leaving the page", () => {
+    const reading = readSecuritySignals(
+      signals({
+        forms: [form({ label: "Sign in", action: "https://pay.other.test/collect", fields: [field({ type: "password" })] })],
+      }),
+    );
+
+    const groups = groupAsks(reading.asks);
+    expect(groups[0].offSite).toBe(true);
+    expect(groups[0].destination).toBe("pay.other.test");
+  });
+
+  /**
+   * The case that made this worth extracting: a form inside a payment provider's frame posting to
+   * that provider reads as a hostname rather than "this site", but it is posting home, not away.
+   */
+  it("does not call a frame's own form off-site just because its destination names a host", () => {
+    const frame = signals({
+      url: "https://pay.example.net/checkout",
+      origin: "https://pay.example.net",
+      hostname: "pay.example.net",
+      forms: [form({ label: "Card", action: "https://pay.example.net/charge", fields: [field({ autocomplete: "cc-number" })] })],
+    });
+    const reading = readSecuritySignals(signals({ frameCount: 1 }), [frame]);
+
+    const groups = groupAsks(reading.asks);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].destination).toBe("pay.example.net");
+    expect(groups[0].offSite).toBe(false);
+  });
+
+  it("claims nothing either way when the destination cannot be read", () => {
+    const reading = readSecuritySignals(
+      signals({
+        forms: [form({ label: "Sign in", action: "", actionRaw: "", hasActionAttribute: false, fields: [field({ type: "password" })] })],
+      }),
+    );
+
+    const groups = groupAsks(reading.asks);
+    expect(groups[0].destination).toBe("unknown");
+    expect(groups[0].offSite).toBe(false);
+  });
+});
+
+describe("pointing at the form itself", () => {
+  it("tells two identically labelled forms apart, even to the same destination", () => {
+    const twin = (label: string) =>
+      form({ label, action: "https://collect.test/x", fields: [field({ type: "email" })] });
+    const reading = readSecuritySignals(signals({ forms: [twin("Form \u201CSubmit\u201D"), twin("Form \u201CSubmit\u201D")] }));
+
+    const groups = groupAsks(reading.asks);
+    expect(groups).toHaveLength(2);
+    expect(groups.map((group) => group.formIndex)).toEqual([0, 1]);
+  });
+
+  it("carries the destination it read, so a highlight can refuse once the page changes it", () => {
+    const reading = readSecuritySignals(
+      signals({ forms: [form({ label: "Signup", action: "https://app.example.net/s", fields: [field({ type: "email" })] })] }),
+    );
+
+    expect(groupAsks(reading.asks)[0].formAction).toBe("https://app.example.net/s");
+  });
+
+  it("records which document a form lives in so the right frame is asked", () => {
+    const frame = signals({
+      url: "https://widget.example.net/embed",
+      origin: "https://widget.example.net",
+      hostname: "widget.example.net",
+      forms: [form({ label: "Subscribe", action: "https://widget.example.net/go", fields: [field({ type: "email" })] })],
+    });
+    const reading = readSecuritySignals(
+      signals({ frameCount: 1, forms: [form({ label: "Top", fields: [field({ type: "email" })] })] }),
+      [frame],
+    );
+
+    const byLabel = Object.fromEntries(groupAsks(reading.asks).map((group) => [group.formIndex + "|" + group.frameUrl, group]));
+    expect(byLabel["0|"]).toBeDefined();
+    expect(byLabel["0|https://widget.example.net/embed"]).toBeDefined();
   });
 });

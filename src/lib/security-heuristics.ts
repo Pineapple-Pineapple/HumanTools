@@ -8,6 +8,7 @@
 
 import { registrableDomain } from "./public-suffix";
 import { describeHostname } from "./punycode";
+import { limit, type Limit } from "./limits";
 
 export interface FieldSignal {
   tag: "input" | "select" | "textarea";
@@ -118,6 +119,58 @@ export interface SensitiveAsk {
   formLabel: string;
   /** Where that form posts, in the reader's words — "this site", a hostname, or "unknown". */
   destination: string;
+  /**
+   * Whether the value leaves the origin of the document its form lives in. A form inside a frame
+   * that posts to that frame's own origin is posting home, so this is false even though its
+   * destination reads as a hostname rather than "this site". False when nothing can be read.
+   */
+  offSite: boolean;
+  /**
+   * Which form this came from, as the collector counted them in that document: the panel finds the
+   * element again by repeating that count, so two forms labelled the same stay tellable apart.
+   */
+  formIndex: number;
+  /** The document the form lives in: "" for the top page, the frame's address otherwise. */
+  frameUrl: string;
+  /** The destination the panel read, so highlighting can refuse if the page has changed it since. */
+  formAction: string;
+}
+
+/** One form's asks, gathered for display: the values it collects and where they go. */
+export interface AskGroup {
+  formLabel: string;
+  destination: string;
+  labels: string[];
+  offSite: boolean;
+  formIndex: number;
+  frameUrl: string;
+  formAction: string;
+}
+
+/**
+ * Collapses asks into one entry per form, keeping each distinct value once and in the order the
+ * page asks for it. Two forms that happen to post to the same address stay separate: they are two
+ * things the reader is being asked to do.
+ */
+export function groupAsks(asks: readonly SensitiveAsk[]): AskGroup[] {
+  const groups = new Map<string, AskGroup>();
+  for (const ask of asks) {
+    // Keyed by the form itself, not by what it says: two forms reading "Submit" that both post to
+    // the same address are still two different things the reader is being asked to do.
+    const key = `${ask.frameUrl}|${ask.formIndex}`;
+    const group = groups.get(key) ?? {
+      formLabel: ask.formLabel,
+      destination: ask.destination,
+      labels: [],
+      offSite: ask.offSite,
+      formIndex: ask.formIndex,
+      frameUrl: ask.frameUrl,
+      formAction: ask.formAction,
+    };
+    if (!group.labels.includes(ask.label)) group.labels.push(ask.label);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
 }
 
 export interface SecurityReading {
@@ -126,7 +179,7 @@ export interface SecurityReading {
   transport: "https" | "http" | "other";
   findings: Finding[];
   asks: SensitiveAsk[];
-  notChecked: string[];
+  notChecked: Limit[];
   counts: { forms: number; links: number; thirdPartyOrigins: number };
 }
 
@@ -295,6 +348,13 @@ function capEvidence(items: string[], limit: number): string[] {
   return [...items.slice(0, limit), `…and ${items.length - limit} more`];
 }
 
+/** Does what this form collects leave the origin of the document the form is in? */
+function isOffSite(form: FormSignal, context: Context): boolean {
+  if (!form.action) return false;
+  const origin = parseOrigin(form.action);
+  return origin !== null && origin !== context.origin;
+}
+
 function destinationOf(form: FormSignal, context: Context): string {
   if (!form.action) return form.actionRaw ? `not a web address (${form.actionRaw})` : "unknown";
   const origin = parseOrigin(form.action);
@@ -362,12 +422,21 @@ export function readSecuritySignals(signals: SecuritySignals, frames: readonly S
   const contexts: Context[] = [contextOf(signals, false), ...frames.map((frame) => contextOf(frame, true))];
 
   const formEntries = contexts.flatMap((context) =>
-    context.signals.forms.map((form) => ({ context, form, kinds: sensitiveKinds(form) })),
+    context.signals.forms.map((form, formIndex) => ({ context, form, formIndex, kinds: sensitiveKinds(form) })),
   );
-  for (const { context, form, kinds } of formEntries) {
+  for (const { context, form, formIndex, kinds } of formEntries) {
     const formLabel = context.frameUrl ? `${form.label}, in a frame from ${hostLabel(context.host)}` : form.label;
     for (const kind of kinds) {
-      asks.push({ kind, label: SENSITIVE_LABELS[kind], formLabel, destination: destinationOf(form, context) });
+      asks.push({
+        kind,
+        label: SENSITIVE_LABELS[kind],
+        formLabel,
+        destination: destinationOf(form, context),
+        offSite: isOffSite(form, context),
+        formIndex,
+        frameUrl: context.frameUrl,
+        formAction: form.action,
+      });
     }
   }
 
@@ -656,29 +725,56 @@ export function readSecuritySignals(signals: SecuritySignals, frames: readonly S
  * left is assembled rather than hardcoded so it also names the limits of this particular run: a
  * truncated list, a frame that returned nothing, a form aimed at a named window.
  */
-export function buildNotChecked(signals: SecuritySignals, frames: readonly SecuritySignals[] = []): string[] {
+/** Labels for the limits the collector reports in its own words, so they can be chips too. */
+const COLLECTOR_LABELS: [RegExp, string][] = [
+  [/form that targets a frame or a named window/i, "form target unknown"],
+];
+
+function collectorLabel(detail: string): string {
+  for (const [pattern, label] of COLLECTOR_LABELS) if (pattern.test(detail)) return label;
+  return "not collected";
+}
+
+export function buildNotChecked(signals: SecuritySignals, frames: readonly SecuritySignals[] = []): Limit[] {
   const documents = [signals, ...frames];
   const sum = (pick: (one: SecuritySignals) => number): number => documents.reduce((total, one) => total + pick(one), 0);
   const any = (pick: (one: SecuritySignals) => boolean): boolean => documents.some(pick);
 
-  const lines = [
-    "What the page does after this snapshot. Script can add a form, change where one posts, or rewrite a link at any moment.",
-    "Whether a name that reads like a familiar one belongs to it. Encoded hostnames are decoded and both forms are shown, so the comparison is there to make; nothing here matches a name against a list of brands, because doing that accuses ordinary international sites of imitation.",
+  const lines: Limit[] = [
+    limit(
+      "changes after this snapshot",
+      "What the page does after this snapshot. Script can add a form, change where one posts, or rewrite a link at any moment.",
+    ),
+    limit(
+      "look-alike names",
+      "Whether a name that reads like a familiar one belongs to it. Encoded hostnames are decoded and both forms are shown, so the comparison is there to make; nothing here matches a name against a list of brands, because doing that accuses ordinary international sites of imitation.",
+    ),
   ];
 
   if (any((one) => one.linksTruncated)) {
-    lines.push(`Links past the first ${sum((one) => one.links.length)} read on this page — there were ${sum((one) => one.linkCount)} in total.`);
+    const read = sum((one) => one.links.length);
+    const total = sum((one) => one.linkCount);
+    lines.push(limit(`${read} of ${total} links read`, `Links past the first ${read} read on this page — there were ${total} in total.`));
   }
-  if (any((one) => one.formsTruncated)) lines.push(`Forms past the first ${sum((one) => one.forms.length)} read on this page.`);
-  if (any((one) => one.codeSourcesTruncated)) lines.push("Script and frame sources past the first 300 in a document on this page.");
-  if (any((one) => one.mixedContentTruncated)) lines.push("Plain-http resources past the first 50 found in a document on this page.");
+  if (any((one) => one.formsTruncated)) {
+    lines.push(limit("some forms unread", `Forms past the first ${sum((one) => one.forms.length)} read on this page.`));
+  }
+  if (any((one) => one.codeSourcesTruncated)) {
+    lines.push(limit("some code sources unread", "Script and frame sources past the first 300 in a document on this page."));
+  }
+  if (any((one) => one.mixedContentTruncated)) {
+    lines.push(limit("some http resources unread", "Plain-http resources past the first 50 found in a document on this page."));
+  }
 
   // Frames are read by injecting into every one of them; the ones that answer are subtracted from
   // the ones the markup declares, and whatever is left over is named rather than assumed empty.
   const unreadFrames = Math.max(0, sum((one) => one.frameCount) - frames.length);
   if (unreadFrames > 0) {
     lines.push(
-      `Inside ${unreadFrames} frame${unreadFrames === 1 ? "" : "s"} that returned nothing. Sandboxed frames and frames that had not finished loading cannot be read; only the frame's address was.`,
+      limit(
+        `${unreadFrames} frame${unreadFrames === 1 ? "" : "s"} unreadable`,
+        `Inside ${unreadFrames} frame${unreadFrames === 1 ? "" : "s"} that returned nothing. Sandboxed frames and frames that had not finished loading cannot be read; only the frame's address was.`,
+      ),
     );
   }
 
@@ -693,10 +789,11 @@ export function buildNotChecked(signals: SecuritySignals, frames: readonly Secur
   }
   for (const [line, places] of reported) {
     const inFrames = places.filter(Boolean);
-    if (inFrames.length === 0) lines.push(line);
-    else if (inFrames.length === 1 && places.length === 1) lines.push(`${line} (in frame ${inFrames[0]})`);
-    else if (inFrames.length === places.length) lines.push(`${line} (in ${inFrames.length} frames on this page)`);
-    else lines.push(`${line} (on this page and in ${inFrames.length} frame${inFrames.length === 1 ? "" : "s"} inside it)`);
+    const label = collectorLabel(line);
+    if (inFrames.length === 0) lines.push(limit(label, line));
+    else if (inFrames.length === 1 && places.length === 1) lines.push(limit(label, `${line} (in frame ${inFrames[0]})`));
+    else if (inFrames.length === places.length) lines.push(limit(label, `${line} (in ${inFrames.length} frames on this page)`));
+    else lines.push(limit(label, `${line} (on this page and in ${inFrames.length} frame${inFrames.length === 1 ? "" : "s"} inside it)`));
   }
   return lines;
 }

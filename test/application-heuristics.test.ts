@@ -250,7 +250,7 @@ describe("buildApplicationReport", () => {
       signals({ crossOriginFrames: 2, permissions: [{ name: "camera", state: "unsupported" }] }),
     );
 
-    expect(report.notChecked.join(" ")).toContain("2 frames");
-    expect(report.notChecked.join(" ")).toContain("camera");
+    expect(report.notChecked.map((entry) => entry.detail).join(" ")).toContain("2 frames");
+    expect(report.notChecked.map((entry) => entry.detail).join(" ")).toContain("camera");
   });
 });

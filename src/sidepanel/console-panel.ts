@@ -82,7 +82,7 @@ function renderConsolePanel(container: HTMLElement): ConsoleEls {
   // Which page the answers are about — without this the panel silently keeps answering
   // about whatever page it first read.
   const pageLabel = document.createElement("p");
-  pageLabel.className = "text-xs text-neutral-500 truncate";
+  pageLabel.className = "text-xs text-muted truncate";
   pageLabel.textContent = NO_PAGE_LABEL;
 
   // A scroll host, not the transcript itself: the transcript is swapped out wholesale when the
@@ -108,7 +108,7 @@ function renderConsolePanel(container: HTMLElement): ConsoleEls {
   inputRow.append(input, sendBtn);
 
   const status = document.createElement("p");
-  status.className = "text-xs text-neutral-500 min-h-[1em]";
+  status.className = "text-xs text-muted min-h-[1em]";
 
   const optionsLink = document.createElement("button");
   optionsLink.textContent = "Set API key";
@@ -293,7 +293,7 @@ function addBubble(thread: Thread, role: "user" | "assistant"): HTMLElement {
 /** A transcript marker for something the panel did, distinct from either side of the conversation. */
 function addNotice(thread: Thread, text: string): void {
   const notice = document.createElement("div");
-  notice.className = "self-center max-w-[90%] text-[11px] text-neutral-500 italic text-center";
+  notice.className = "self-center max-w-[90%] text-[11px] text-muted italic text-center";
   notice.textContent = text;
   thread.transcript.appendChild(notice);
 }

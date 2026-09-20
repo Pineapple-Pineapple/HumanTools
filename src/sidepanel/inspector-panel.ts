@@ -12,7 +12,7 @@ import {
 import { requestOutlineLabels, startInspect } from "../lib/messages";
 import type { InspectTrace, TraceState } from "../lib/messages";
 import { getActiveTabId } from "../lib/active-tab";
-import { createTabStore, getCurrentTabId, onTabActivated, onTabLoaded, onTabNavigated } from "../lib/tab-state";
+import { createTabStore, getCurrentTabId, onTabActivated, onTabClosed, onTabLoaded, onTabNavigated } from "../lib/tab-state";
 import { getSourceTracerUrl } from "../lib/provider";
 import { heuristicClaimType, splitSentences } from "../lib/claim-heuristics";
 import type { ContextSource, SourceContextReason, SourceQuality, VerifiedSource } from "../lib/source-tracer-client";
@@ -77,7 +77,7 @@ const OUTLINE_LABEL_TEXT: Record<OutlineLabel, string> = {
 const OUTLINE_CHIP: Record<OutlineLabel, string> = {
   important: "bg-amber-950 text-amber-300 border-amber-800",
   supporting: "bg-neutral-800 text-neutral-300 border-neutral-600",
-  boilerplate: "bg-neutral-900 text-neutral-500 border-neutral-700",
+  boilerplate: "bg-neutral-900 text-muted border-neutral-700",
   navigation: "bg-sky-950 text-sky-300 border-sky-800",
   advertisement: "bg-red-950 text-red-300 border-red-800",
 };
@@ -86,7 +86,7 @@ const TRACE_ICON: Record<TraceState, string> = { running: "…", done: "✓", sk
 const TRACE_ICON_CLASS: Record<TraceState, string> = {
   running: "text-amber-400",
   done: "text-emerald-400",
-  skipped: "text-neutral-500",
+  skipped: "text-muted",
   failed: "text-red-400",
 };
 
@@ -96,7 +96,7 @@ const BTN_PRIMARY =
   "inline-flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:hover:bg-amber-600 rounded text-neutral-950 font-medium";
 const CHIP = "inline-flex items-center px-1.5 py-0.5 rounded border text-[11px] leading-none";
 const NO_SELECTION_HINT = "Select a sentence or paragraph on the page first (at least a few words).";
-const SECTION_LABEL = "text-[11px] uppercase tracking-wide text-neutral-500";
+const SECTION_LABEL = "text-[11px] uppercase tracking-wide text-muted";
 
 export function sourceContextMessage(reasons: readonly SourceContextReason[]): string {
   if (reasons.includes("page_context") && reasons.includes("non_factual_context")) {
@@ -247,19 +247,19 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   clearBtn.hidden = true;
   toolbar.append(pickBtn, inspectBtn, clearBtn);
 
-  const status = el("p", "text-xs text-neutral-500 min-h-[1em]", CLAIMS_HINT);
+  const status = el("p", "text-xs text-muted min-h-[1em]", CLAIMS_HINT);
 
   const passageSection = el("div", "flex flex-col gap-1.5");
   const provisionalSection = el("div", "flex flex-col gap-1.5");
   const slopSection = el("div", "flex flex-col gap-1.5");
   const claimsSection = el("div", "flex flex-col gap-3");
   const traceDetails = el("details", "text-xs text-neutral-400");
-  const traceSummary = el("summary", "cursor-pointer select-none text-neutral-500 hover:text-neutral-300", "Trace");
+  const traceSummary = el("summary", "cursor-pointer select-none text-muted hover:text-neutral-300", "Trace");
   const traceList = el("div", "flex flex-col gap-1 mt-2");
   traceDetails.append(traceSummary, traceList);
   const claimsFooter = el(
     "p",
-    "text-[11px] text-neutral-500 border-t border-neutral-800 pt-3",
+    "text-[11px] text-muted border-t border-neutral-800 pt-3",
     "A matching source is evidence only when it is a distinct eligible external page. Text found on this page is context, not verification. " +
       "No result is not proof that a claim is false.",
   );
@@ -364,7 +364,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     const icon = el("span", `w-3 shrink-0 text-center ${TRACE_ICON_CLASS[state]}`, TRACE_ICON[state]);
     const name = el("span", "text-neutral-300 shrink-0", step);
     const parts = [detail, ms !== undefined ? formatMs(ms) : undefined].filter(Boolean).join(" · ");
-    const info = el("span", "text-neutral-500 min-w-0 break-words", parts);
+    const info = el("span", "text-muted min-w-0 break-words", parts);
     row.replaceChildren(icon, name, info);
   }
 
@@ -404,7 +404,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     const meta = [target.title, formatDate(target.publishedAt) ? `published ${formatDate(target.publishedAt)}` : undefined]
       .filter(Boolean)
       .join(" · ");
-    passageSection.append(quote, el("div", "text-[11px] text-neutral-500", meta));
+    passageSection.append(quote, el("div", "text-[11px] text-muted", meta));
   }
 
   function renderProvisional(text: string): number {
@@ -452,7 +452,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
 
     const field = (label: string, value: string) => {
       const row = el("div", "text-xs text-neutral-300 leading-snug");
-      row.append(el("span", "text-neutral-500", `${label}: `), document.createTextNode(value));
+      row.append(el("span", "text-muted", `${label}: `), document.createTextNode(value));
       return row;
     };
     card.appendChild(field("Stated source", claim.statedSource ?? "none — the page cites nothing for this"));
@@ -478,7 +478,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
         link.target = "_blank";
         link.rel = "noopener noreferrer";
         link.title = source.href;
-        const tag = el("span", "shrink-0 text-[10px] text-neutral-500", "not externally verified");
+        const tag = el("span", "shrink-0 text-[10px] text-muted", "not externally verified");
         tag.title = "Offered by the page as backing; this is distinct from a source the Source Tracer checked.";
         row.append(link, tag);
         evidence.appendChild(row);
@@ -556,7 +556,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
       section.appendChild(el("div", "text-xs text-neutral-400", noExternalSourcesMessage(notChecked)));
       if (notChecked) {
         section.appendChild(
-          el("div", "text-[10px] text-neutral-500", "This is not a finding about the claim; no external check ran."),
+          el("div", "text-[10px] text-muted", "This is not a finding about the claim; no external check ran."),
         );
       }
       return;
@@ -614,7 +614,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
       );
     }
     slopSection.appendChild(
-      el("div", "text-[11px] text-neutral-500", "A probability from GPTZero, not proof of who wrote this passage."),
+      el("div", "text-[11px] text-muted", "A probability from GPTZero, not proof of who wrote this passage."),
     );
   }
 
@@ -887,12 +887,12 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   showOnPageLabel.append(showOnPage, el("span", "", "Show labels on page"));
   outlineToolbar.append(outlineBtn, showOnPageLabel);
 
-  const outlineStatus = el("p", "text-xs text-neutral-500 min-h-[1em]", OUTLINE_HINT);
+  const outlineStatus = el("p", "text-xs text-muted min-h-[1em]", OUTLINE_HINT);
   const legend = el("div", "flex flex-wrap gap-1.5");
   const tree = el("div", "flex flex-col font-mono text-xs");
   const outlineFooter = el(
     "p",
-    "text-[11px] text-neutral-500 border-t border-neutral-800 pt-3",
+    "text-[11px] text-muted border-t border-neutral-800 pt-3",
     "What we could not check: text inside iframes and images isn't read, and labels come from each block's " +
       "text plus page-structure signals — a reading, not a guarantee.",
   );
@@ -952,7 +952,7 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
       row.title = block.text;
       const isHeading = /^h[1-6]$/.test(block.tag);
       row.append(
-        el("span", "shrink-0 text-neutral-500", `<${block.tag}>`),
+        el("span", "shrink-0 text-muted", `<${block.tag}>`),
         el("span", `${CHIP} shrink-0 font-sans ${OUTLINE_CHIP[block.label]}`, OUTLINE_LABEL_TEXT[block.label]),
         el("span", `truncate font-sans ${isHeading ? "text-neutral-100 font-medium" : "text-neutral-300"}`, block.text),
       );
@@ -1102,15 +1102,29 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     void showTab(tabId);
   });
 
+  // An inspection outlives the panel, but not the tab it describes. Closing the tab takes the page
+  // with it, so the copy in session storage has nothing left to be about.
+  onTabClosed((tabId) => forgetInspection(tabId));
+
   void (async () => {
     // Inspections survive the panel closing; each is checked against its tab's current page before
     // it is shown, in showTab.
     const stored = await chrome.storage.session.get(INSPECTION_KEY);
     const byTab = stored[INSPECTION_KEY] as Record<string, SavedInspection> | undefined;
+    // A tab closed while the panel was shut had nobody listening for it, and Chrome hands tab ids
+    // out again, so anything without a live tab is dropped here rather than kept for the session.
+    const live = new Set((await chrome.tabs.query({})).map((tab) => tab.id));
+    let dropped = false;
     for (const [key, record] of Object.entries(byTab ?? {})) {
       const tabId = Number(key);
-      if (Number.isInteger(tabId) && record?.claims?.length) persisted.set(tabId, record);
+      if (!Number.isInteger(tabId) || !record?.claims?.length) continue;
+      if (!live.has(tabId)) {
+        dropped = true;
+        continue;
+      }
+      persisted.set(tabId, record);
     }
+    if (dropped) writePersisted();
     try {
       await showTab(getCurrentTabId() ?? (await getActiveTabId()));
     } catch {
