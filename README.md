@@ -2,7 +2,7 @@
 
 DevTools for what a page *means*, not how it's built. A Chromium side panel with five tabs named after DevTools panels, each answering a human question about the page in front of you.
 
-New here? [**GETTING-STARTED.md**](./GETTING-STARTED.md) walks through installing it and using each panel once on a real page.
+New here? [**GETTING-STARTED.md**](./GETTING-STARTED.md) is the walkthrough and the setup guide: installing it, where every key comes from, deploying the optional Source Tracer Worker, and using each panel once on a real page. This file is the reference for what the tool is and how it behaves.
 
 | Panel | Question | Needs a key? |
 | --- | --- | --- |
@@ -37,6 +37,8 @@ Every panel ends with **Blind spots**: only real, current limits of that reading
 
 ## Setup
 
+Step by step, including which accounts and keys each panel needs and where to get them: [**GETTING-STARTED.md**](./GETTING-STARTED.md). In outline — build, load `dist/` unpacked at `chrome://extensions`, then paste an **OpenAI** or **OpenRouter** key into the extension's **Options** and press **Test**. A GPTZero key (Slop Check) and a Source Tracer endpoint (below) are optional.
+
 ```sh
 bun install
 bun run dev     # Vite + CRXJS with HMR
@@ -44,11 +46,7 @@ bun run build   # production build to dist/
 bun run test    # vitest
 ```
 
-1. `bun run build`
-2. Open `chrome://extensions`, enable Developer mode
-3. **Load unpacked** → select `dist/`
-
-Then open the extension's **Options** (right-click the icon, or the link in any panel), pick **OpenAI** or **OpenRouter**, paste its key, and press **Test** — it sends only the key to a free, read-only endpoint and reports whether it was accepted. Optional: a GPTZero key for the Slop Check, and a Source Tracer endpoint (below). Keys stay in `chrome.storage.local`; the background service worker is the only place one is read.
+Keys stay in `chrome.storage.local`; the background service worker is the only place one is read. The panels call `gpt-4o-mini` (`openai/gpt-4o-mini` through OpenRouter).
 
 ## Privacy
 
@@ -61,21 +59,11 @@ Then open the extension's **Options** (right-click the icon, or the link in any 
 
 ## Source Tracer Worker (optional)
 
-`worker/` is a separate Cloudflare Worker that finds and checks external sources for Inspector's claims: Brave Search for candidates, Browserbase to load each one and confirm the quote is really there, Elasticsearch to remember what it has seen. It exists so those credentials never live in the browser. Without it, Inspector still works and shows "Not checked" for external sources.
+`worker/` is a separate Cloudflare Worker that finds and checks external sources for Inspector's claims: Brave Search for candidates, Browserbase to load each one and confirm the quote is really there, Elasticsearch to remember what it has seen. It exists so those credentials never live in the browser. There is no shared service: the endpoint is one you deploy to your own account and paste into Options. Without it, Inspector still works and shows "Not checked" for external sources.
 
-```sh
-cd worker
-npm ci
-npm test                                  # 48 tests
-npx wrangler login                        # once
-npx wrangler secret put BRAVE_SEARCH_API_KEY
-npx wrangler secret put BROWSERBASE_API_KEY
-npx wrangler secret put ELASTIC_URL
-npx wrangler secret put ELASTIC_API_KEY
-npm run deploy                            # prints the workers.dev URL
-```
+**Deploying it, and getting its four credentials: [GETTING-STARTED.md §7](./GETTING-STARTED.md#7-optional-the-source-tracer-worker).**
 
-Paste `https://<your-worker>.workers.dev/v1/trace` into **Source Tracer endpoint** in Options. The endpoint is rate-limited per install (30 traces per 10 minutes by default; `TRACE_RATE_LIMIT` / `TRACE_RATE_WINDOW_SECONDS` vars override) and refuses oversized requests. For local runs, copy `.dev.vars.example` to `.dev.vars` and `npm run dev`.
+How it behaves: a trace is answered from the index alone when that exact quote was verified there within 30 days; otherwise it costs one search and up to five browser fetches for that claim, and whatever verifies is indexed for next time. The endpoint is rate-limited per install (30 traces per 10 minutes by default; `TRACE_RATE_LIMIT` / `TRACE_RATE_WINDOW_SECONDS` vars override) and refuses oversized requests. The Worker creates its own `human-tools-sources` index; a cluster without the `.rerank-v1-elasticsearch` endpoint loses the reranking step, not the trace. `npm test` in `worker/` is 48 tests and needs no credentials.
 
 ## Working on it
 

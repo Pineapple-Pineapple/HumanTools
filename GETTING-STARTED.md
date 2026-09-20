@@ -1,6 +1,6 @@
 # Getting started
 
-A first session with Human Tools: install it, give it a key, and use each panel once on a real page. About fifteen minutes. [`README.md`](./README.md) is the reference; this is the walkthrough.
+A first session with Human Tools: install it, give it a key, and use each panel once on a real page. About fifteen minutes. Everything you have to set up lives here — where each key comes from, and how to deploy the optional Source Tracer Worker ([§7](#7-optional-the-source-tracer-worker), another twenty minutes if you want it). [`README.md`](./README.md) says what the tool is and how it behaves; this is the walkthrough.
 
 ## 1. Install it
 
@@ -53,19 +53,26 @@ A shopping or newsletter signup page gives you far more here than an article doe
 
 ## 3. Add a key
 
-The other three panels send text to a model, so they need your own API key.
+The other three panels send text to a model, so they need your own API key. One provider is enough:
+
+- **OpenAI** — create a key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys). The extension calls `gpt-4o-mini`. The API bills separately from a ChatGPT subscription, so the account needs credit on it.
+- **OpenRouter** — [openrouter.ai/keys](https://openrouter.ai/keys). One key for many providers; the extension asks it for `openai/gpt-4o-mini`. Also needs credit.
+
+At those prices a rewritten article or a paragraph's worth of claims costs a fraction of a cent — but it is your money, which is why nothing spends it without a button press.
 
 Right-click the extension icon → **Options** (or click **Set API key** in any panel).
 
-1. Pick **OpenAI** or **OpenRouter**. OpenRouter is one key for many models; either works.
+1. Pick **OpenAI** or **OpenRouter**. Either works.
 2. Paste the key into that provider's field. Typing into a field selects its provider automatically, so you can't strand a key behind the wrong radio.
 3. Press **Test key**. It sends only the key, as typed, to a free read-only endpoint and reports **Key accepted.** or the rejection. Nothing is generated or billed.
 4. **Save**.
 
+Keys are written to `chrome.storage.local` and read in exactly one place, the extension's background service worker. There is no Human Tools server in the middle: calls go from your browser to the provider you picked.
+
 Two optional fields you can ignore for now:
 
-- **GPTZero API key** — turns on Inspector's Slop Check, an AI-text probability for a passage.
-- **Source Tracer endpoint** — a Cloudflare Worker *you* deploy (see the README) that searches for and verifies external sources. Without it, Inspector works fine and honestly reports external sources as *Not checked* rather than pretending it looked.
+- **GPTZero API key** — turns on Inspector's Slop Check, an AI-text probability for a passage. Keys come from the [GPTZero API dashboard](https://app.gptzero.me/app/api).
+- **Source Tracer endpoint** — a Cloudflare Worker *you* deploy, which finds and checks a claim's sources out on the web. It needs four accounts of its own, so leave this empty for now; [§7](#7-optional-the-source-tracer-worker) is the whole procedure. Without it, Inspector works fine and honestly reports external sources as *Not checked* rather than pretending it looked.
 
 Back in the panel, the banner is gone.
 
@@ -115,6 +122,91 @@ Switch the segmented control to **Outline** and press **Outline this page** for 
 
 **Clear** removes the badges and the cards.
 
+## 7. Optional: the Source Tracer Worker
+
+Everything above is now working, and this is the one piece of Human Tools that isn't the extension: a Cloudflare Worker you deploy to your own account, which Inspector calls to look for a claim's sources *outside* the page. Skip it and Inspector still works — external sources read *Not checked*, which is true rather than flattering.
+
+Its code is in this repo under `worker/`. It is separate for one reason: the credentials it needs — a search API, a remote browser, a search index — must never sit in a browser extension, where any page's script could reach for them. There is no shared Human Tools service to point at instead; the endpoint is yours.
+
+Per claim it asks its Elasticsearch index whether it has already verified this exact quote (anything verified in the last 30 days stands), and only otherwise spends anything: one Brave search for candidates, then up to five of them loaded in a Browserbase browser, keeping only sources where the quote is really present. What it verifies goes back into the index.
+
+### What you need
+
+Four accounts. Each has a free way in; none of them is unlimited.
+
+| | Where to get it | What it costs |
+| --- | --- | --- |
+| **Cloudflare account** | [dash.cloudflare.com/sign-up](https://dash.cloudflare.com/sign-up) | The free Workers plan is enough. The Worker's single Durable Object is SQLite-backed, which the free plan includes (100,000 requests a day). |
+| **`BRAVE_SEARCH_API_KEY`** | [api-dashboard.search.brave.com](https://api-dashboard.search.brave.com/) → subscribe to a Web Search plan → **API Keys** | Metered since February 2026: roughly $5 of free credit a month (about 1,000 queries), and a card is required even to stay inside it. |
+| **`BROWSERBASE_API_KEY`** | [browserbase.com](https://www.browserbase.com/) → **Settings** | Free plan: 3 concurrent browsers and about one browser-hour, no card. The key is all you need — the project is inferred from it. |
+| **`ELASTIC_URL` + `ELASTIC_API_KEY`** | [cloud.elastic.co](https://cloud.elastic.co/) → create a deployment or serverless project → copy the **Elasticsearch endpoint**, then create an API key | Free trial, then paid. Elastic Cloud already ships the two inference endpoints the Worker asks for: `.elser-2-elasticsearch` for embeddings and `.rerank-v1-elasticsearch` for reranking. |
+
+`ELASTIC_URL` is the **Elasticsearch** endpoint (`https://….es.….cloud.es.io`), not the Kibana address. You don't create the index: the Worker creates `human-tools-sources` with its own mapping on the first trace. A self-managed cluster that lacks the reranker is fine — the Worker sees the rejection, drops the reranking step and lets the fused search stand, rather than failing the trace.
+
+Budget before you start. One claim is one search and up to five page loads; a paragraph with ten claims can be ten searches and fifty page loads. The index is what keeps a second look at the same claim from costing anything.
+
+### Deploy it
+
+```sh
+cd worker
+npm ci
+npm test              # 48 tests, no credentials needed
+npx wrangler login    # opens Cloudflare in your browser, once
+npm run deploy        # prints https://human-tools-source-tracer.<your-subdomain>.workers.dev
+```
+
+Then hand it the credentials. Each command prompts for the value and stores it encrypted on the Worker — never in this repo, never in the bundle — and takes effect without deploying again:
+
+```sh
+npx wrangler secret put BRAVE_SEARCH_API_KEY
+npx wrangler secret put BROWSERBASE_API_KEY
+npx wrangler secret put ELASTIC_URL
+npx wrangler secret put ELASTIC_API_KEY
+```
+
+(Setting the secrets before the first deploy also works — wrangler offers to create the Worker for you.)
+
+### Point the extension at it
+
+Options → **Source Tracer endpoint**: the URL the deploy printed, with `/v1/trace` on the end.
+
+```
+https://human-tools-source-tracer.<your-subdomain>.workers.dev/v1/trace
+```
+
+It must start with `https://` — Options refuses to save anything else, because the extension ignores a non-https endpoint, and you would be left wondering why everything still said *Not checked*. **Save**.
+
+Now inspect a paragraph that leans on something external — a news story citing a study — and open **Trace**. You should see **Source recall**, **Source search**, **Source fetch** and **Source verifier** steps with their timings, and cards naming external sources with the excerpt that matched. The first trace is the slow one: Elastic is creating the index and warming its model.
+
+### Running it locally
+
+`npm run dev` serves the Worker on `http://localhost:8787`, reading credentials from a gitignored file instead of the deployed secrets:
+
+```sh
+cd worker
+cp .dev.vars.example .dev.vars   # fill in the same four values
+npm run dev
+```
+
+The extension can't talk to that (Options requires https), so drive it with `curl`. The reply is one JSON line per trace event as it happens:
+
+```sh
+curl -N localhost:8787/v1/trace -H 'content-type: application/json' -d '{
+  "claim": "Sea level has risen about four inches since 1993",
+  "verifiedQuote": "sea level has risen about four inches since 1993",
+  "page": { "url": "https://example.com/article", "title": "Example" },
+  "installId": "dev"
+}'
+```
+
+### If the tracer looks wrong
+
+- **Every claim still says *Not checked*** — the endpoint didn't save (it must start with `https://`), or the run never reached source tracing. **Trace** says which.
+- **"The Source Tracer is rate-limiting this install"** — 30 traces per 10 minutes per install. Add `TRACE_RATE_LIMIT` and `TRACE_RATE_WINDOW_SECONDS` as `vars` in `worker/wrangler.jsonc` to change that.
+- **Trace shows *Source search* failed with "Brave returned an invalid search response"** — the Brave key is wrong, its plan lapsed, or the credit is gone. A single `curl` to `https://api.search.brave.com/res/v1/web/search?q=test` with an `X-Subscription-Token` header tells you which.
+- **Every *Source fetch* fails** — Browserbase is out of browser-hours, or the key is wrong. `npx wrangler tail` shows the Worker's own errors while you retry.
+- **Trace shows *Source recall* failed** — Elastic is unreachable or its key is wrong. Traces still run; they just stop remembering, and the search spend goes up.
+
 ## What to try next
 
 - A page with a **misleading statistic** — Inspector's framing flags are the point of the tool.
@@ -126,5 +218,5 @@ Switch the segmented control to **Outline** and press **Outline this page** for 
 
 - **"No paragraph text found on this page."** — the page has no readable prose blocks, or it's still loading. Some app-shell sites genuinely have nothing to read.
 - **A panel says "No OpenAI API key set."** — open Options and press **Test key**; the key may be rejected rather than missing.
-- **Inspector shows "Not checked" for external sources** — expected unless you deployed the Source Tracer Worker. It means nothing was checked, not that nothing was found.
+- **Inspector shows "Not checked" for external sources** — expected unless you deployed the Source Tracer Worker ([§7](#7-optional-the-source-tracer-worker)). It means nothing was checked, not that nothing was found.
 - **Changes vanished after a reload** — rewrites and badges live in the page, so a reload clears them. The panel notices and updates rather than claiming they're still there.

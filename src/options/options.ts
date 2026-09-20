@@ -6,7 +6,8 @@ type StoredKey = "openaiApiKey" | "openrouterApiKey" | "gptzeroApiKey" | "source
 const STORED_KEYS: StoredKey[] = ["openaiApiKey", "openrouterApiKey", "gptzeroApiKey", "sourceTracerUrl"];
 const PROVIDERS: Provider[] = ["openai", "openrouter"];
 
-const README_TRACER_URL = "https://github.com/Pineapple-Pineapple/HumanTools#source-tracer-worker";
+const TRACER_SETUP_URL =
+  "https://github.com/Pineapple-Pineapple/HumanTools/blob/main/GETTING-STARTED.md#7-optional-the-source-tracer-worker";
 
 const INPUT_CLASS = "w-full bg-neutral-800 border border-neutral-600 rounded px-2 py-1.5 text-neutral-100";
 const LABEL_CLASS = "text-sm text-neutral-300";
@@ -221,7 +222,7 @@ const sourceTracerField = field({
   placeholder: "https://…workers.dev/v1/trace",
   hint: [
     "There is no shared Source Tracer service: this is the URL of a Cloudflare Worker you deploy yourself, following the ",
-    link(README_TRACER_URL, "Source Tracer Worker section of the README"),
+    link(TRACER_SETUP_URL, "Source Tracer Worker section of GETTING-STARTED.md"),
     ". Search and browsing credentials live on that Worker, not in this extension. Without it, Inspector still works but external sources show “Not checked”.",
   ],
 });
