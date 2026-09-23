@@ -10,3 +10,12 @@ dist/
 .dev.vars
 .dev.vars.*
 !.dev.vars.example
+
+# Packaged builds for the Web Store; rebuild from dist/ with `bun run build`.
+*.zip
+
+# Local agent tooling, not part of the extension.
+.agents/
+skill-observations/
+cross-cutting-principles.md
+skills-lock.json
