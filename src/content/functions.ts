@@ -9,10 +9,11 @@ import type { InspectTarget, OutlineBlock, OutlineLabel, PageModel } from "../li
  * the function body itself.
  *
  * Block text is whitespace-collapsed, so a quote verified against it can be found again on the
- * page by the same comparison. `rewrittenBlocks` counts paragraphs currently carrying a rewrite,
- * so the Accessibility panel's Restore reflects the page rather than its memory of it.
+ * page by the same comparison. `rewrittenIds` names the paragraphs currently carrying a rewrite,
+ * so the Accessibility panel's Restore — and its judgement of whether a targeted paragraph's text
+ * changed legitimately — reflect the page rather than its memory of it.
  */
-export function extractPageBlocks(): PageModel & { rewrittenBlocks: number } {
+export function extractPageBlocks(): PageModel & { rewrittenIds: string[] } {
   const MIN_BLOCK_LENGTH = 40;
   const EXCLUDED_ANCESTOR_SELECTOR = "nav, header, footer, aside, script, style";
   const REWRITTEN_CLASS = "__ht-rewritten";
@@ -40,8 +41,10 @@ export function extractPageBlocks(): PageModel & { rewrittenBlocks: number } {
   });
 
   const links = Array.from(linkMap, ([href, text]) => ({ href, text }));
-  const rewrittenBlocks = document.querySelectorAll(`.${REWRITTEN_CLASS}`).length;
-  return { url: location.href, blocks, links, rewrittenBlocks };
+  const rewrittenIds = Array.from(document.querySelectorAll(`.${REWRITTEN_CLASS}[data-ht-block-id]`), (el) =>
+    el.getAttribute("data-ht-block-id"),
+  ).filter((id): id is string => id !== null);
+  return { url: location.href, blocks, links, rewrittenIds };
 }
 
 /**
@@ -328,22 +331,57 @@ export function watchSelection(): void {
 }
 
 /**
- * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. The
- * Inspector's crosshair: hovering a block outlines it and underlines its claim-bearing sentences
- * (via the CSS Highlight API, so the page's DOM is never rewritten); clicking selects the block's
- * text and tells the side panel it was picked. Escape cancels. Calling it again restarts cleanly.
+ * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. Maps the
+ * reader's selection to the rewritable paragraph containing it, so selecting a few words is a way
+ * of pointing at a paragraph rather than a way of rewriting a fragment. Only paragraphs
+ * extractPageBlocks has already stamped can be returned, which is exactly the set the rewrite
+ * pipeline can patch; a selection spanning several of them resolves to their common one, or to
+ * nothing when they have none. Returns null when the selection points at no rewritable paragraph.
  */
-export function startPickMode(): void {
+export function captureSelectedBlock(): { blockId: string; text: string } | null {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+
+  const node = selection.getRangeAt(0).commonAncestorContainer;
+  const from = node instanceof Element ? node : node.parentElement;
+  const block = from?.closest("p[data-ht-block-id]");
+  if (!(block instanceof HTMLElement)) return null;
+
+  const blockId = block.getAttribute("data-ht-block-id");
+  if (!blockId) return null;
+  return { blockId, text: (block.textContent ?? "").replace(/\s+/g, " ").trim() };
+}
+
+/**
+ * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. The
+ * crosshair: hovering a block outlines it and (for the Inspector) underlines its claim-bearing
+ * sentences via the CSS Highlight API, so the page's DOM is never rewritten; clicking selects the
+ * block's text and tells the side panel it was picked. Escape cancels.
+ *
+ * Two panels arm this — the Inspector over anything worth reading, Accessibility only over the
+ * paragraphs it can actually rewrite — so `config.selector` decides what lights up and
+ * `config.source` is echoed in every message back. With `config.multi` the crosshair survives a
+ * click and keeps picking, for a panel building up a set rather than choosing one thing. The page holds one picker, so arming a second
+ * supersedes the first; the superseded panel is told (HT_PICK_CANCELLED under *its* source) rather
+ * than left believing its crosshair is still live.
+ */
+export function startPickMode(config: {
+  source: string;
+  selector: string;
+  underlineClaims: boolean;
+  multi?: boolean;
+}): void {
   const STYLE_ID = "__ht-pick-style";
   const HOVER_CLASS = "__ht-pick-hover";
   const ROOT_CLASS = "__ht-picking";
   const HIGHLIGHT_NAME = "__ht-claim-cue";
-  const BLOCK_SELECTOR = "p, li, blockquote, dd, dt, td, th, figcaption, h1, h2, h3, h4, h5, h6, pre";
+  const BLOCK_SELECTOR = config.selector;
+  const SOURCE = config.source;
   const CLAIM_CUE =
     /\d|%|\b(according to|study|survey|report(?:s|ed)?|percent|increase[sd]?|decrease[sd]?|doubled|tripled|million|billion|found that|shows? that|estimated?|first|largest|most|least)\b/i;
 
-  const w = window as unknown as { __htPick?: { stop: () => void } };
-  w.__htPick?.stop();
+  const w = window as unknown as { __htPick?: { stop: (superseded?: boolean) => void } };
+  w.__htPick?.stop(true);
 
   if (!document.getElementById(STYLE_ID)) {
     const style = document.createElement("style");
@@ -383,6 +421,7 @@ export function startPickMode(): void {
     hovered = next;
     if (!hovered) return;
     hovered.classList.add(HOVER_CLASS);
+    if (!config.underlineClaims) return;
     const ranges = claimRanges(hovered);
     if (ranges.length && typeof Highlight !== "undefined") CSS.highlights.set(HIGHLIGHT_NAME, new Highlight(...ranges));
   }
@@ -398,22 +437,39 @@ export function startPickMode(): void {
     e.preventDefault();
     e.stopPropagation();
     const picked = hovered;
-    stop();
-    const selection = window.getSelection();
-    selection?.removeAllRanges();
-    const range = document.createRange();
-    range.selectNodeContents(picked);
-    selection?.addRange(range);
-    chrome.runtime.sendMessage({ type: "HT_PICKED" }).catch(() => {});
+    // A multi picker stays armed so the next click adds to the set; a single picker is done.
+    if (!config.multi) {
+      stop();
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      const range = document.createRange();
+      range.selectNodeContents(picked);
+      selection?.addRange(range);
+    }
+    // The block id rides along for Accessibility, which patches by id rather than by selection.
+    // The Inspector ignores it and re-reads the selection it was just handed.
+    chrome.runtime
+      .sendMessage({
+        type: "HT_PICKED",
+        source: SOURCE,
+        blockId: picked.getAttribute("data-ht-block-id"),
+        text: (picked.textContent ?? "").replace(/\s+/g, " ").trim(),
+      })
+      .catch(() => {});
   }
 
   function onKey(e: KeyboardEvent): void {
     if (e.key !== "Escape") return;
     stop();
-    chrome.runtime.sendMessage({ type: "HT_PICK_CANCELLED" }).catch(() => {});
+    chrome.runtime.sendMessage({ type: "HT_PICK_CANCELLED", source: SOURCE }).catch(() => {});
   }
 
-  function stop(): void {
+  function stop(superseded = false): void {
+    // Only a supersede announces itself: an ordinary stop is something the panel already knows
+    // about, and telling it would race its own state back to "not picking".
+    if (superseded) {
+      chrome.runtime.sendMessage({ type: "HT_PICK_CANCELLED", source: SOURCE }).catch(() => {});
+    }
     document.removeEventListener("mouseover", onOver, true);
     document.removeEventListener("click", onClick, true);
     document.removeEventListener("keydown", onKey, true);
@@ -429,9 +485,42 @@ export function startPickMode(): void {
   w.__htPick = { stop };
 }
 
+/**
+ * Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. Marks the
+ * paragraphs the Accessibility panel is currently aimed at, replacing whatever was marked before;
+ * an empty list clears them. Without this a reader building up a set across a long page has no way
+ * to see which paragraphs they chose.
+ *
+ * The mark is an inset rail rather than an outline, so it never reads as the crosshair's hover
+ * (a solid outline) or as a finished rewrite (a dashed one) — a targeted paragraph that then gets
+ * rewritten wears both at once and they have to stay tellable apart.
+ */
+export function markTargets(blockIds: string[]): void {
+  const TARGET_CLASS = "__ht-target";
+  const STYLE_ID = "__ht-target-style";
+
+  if (!document.getElementById(STYLE_ID)) {
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent =
+      `.${TARGET_CLASS} { box-shadow: inset 3px 0 0 #f59e0b; background: rgba(245,158,11,.06); ` +
+      `padding-left: 8px; border-radius: 2px; }`;
+    document.head.appendChild(style);
+  }
+
+  const wanted = new Set(blockIds);
+  document.querySelectorAll(`.${TARGET_CLASS}`).forEach((el) => {
+    const id = el.getAttribute("data-ht-block-id");
+    if (id === null || !wanted.has(id)) el.classList.remove(TARGET_CLASS);
+  });
+  for (const id of wanted) {
+    document.querySelector(`[data-ht-block-id="${id}"]`)?.classList.add(TARGET_CLASS);
+  }
+}
+
 /** Self-contained, invoked via chrome.scripting.executeScript — see extractPageBlocks. */
 export function stopPickMode(): void {
-  (window as unknown as { __htPick?: { stop: () => void } }).__htPick?.stop();
+  (window as unknown as { __htPick?: { stop: (superseded?: boolean) => void } }).__htPick?.stop();
 }
 
 /**
