@@ -344,6 +344,8 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
   /** Whether source tracing can run at all, so cards don't claim to be checking when nothing will. */
   let tracerConfigured = false;
   let pickTabId: number | null = null;
+  /** Tags this panel's crosshair, so Accessibility's picks and cancels are not mistaken for ours. */
+  const PICK_SOURCE = "inspector";
   /** The tab whose HT_SELECTION reports drive the Inspect selection button, and its last report. */
   let selectionTabId: number | null = null;
   let hasSelection = false;
@@ -909,7 +911,17 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     }
     try {
       const tabId = await getActiveTabId();
-      await chrome.scripting.executeScript({ target: { tabId }, func: startPickMode });
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        func: startPickMode,
+        args: [
+          {
+            source: PICK_SOURCE,
+            selector: "p, li, blockquote, dd, dt, td, th, figcaption, h1, h2, h3, h4, h5, h6, pre",
+            underlineClaims: true,
+          },
+        ],
+      });
       setPicking(tabId);
       setStatus("Hover the page — claim-bearing sentences get underlined. Click a paragraph to inspect it; Esc cancels.");
     } catch (err) {
@@ -996,6 +1008,9 @@ export function mountInspectorPanel(container: HTMLElement, options: InspectorOp
     if (message?.type === "HT_SELECTION" && fromTab === selectionTabId) {
       hasSelection = message.hasSelection === true;
       updateToolbar();
+    } else if (message?.source !== undefined && message.source !== PICK_SOURCE) {
+      // Accessibility's crosshair, armed over the same page. Not ours to act on.
+      return;
     } else if (message?.type === "HT_PICKED" && fromTab === pickTabId) {
       setPicking(null);
       options.activate();
